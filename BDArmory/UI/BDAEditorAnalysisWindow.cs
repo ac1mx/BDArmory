@@ -19,24 +19,24 @@ namespace BDArmory.UI
         private ApplicationLauncherButton toolbarButton = null;
 
         private bool showRcsWindow = false;
-        private Rect windowRect = new Rect(300, 150, !BDArmorySettings.ASPECTED_RCS ? 650 : 670, 500);
+        internal Rect windowRect = new Rect(300, 150, !BDArmorySettings.ASPECTED_RCS ? 650 : 670, 500);
 
         private bool takeSnapshot = false;
-        private float rcsReductionFactor;
+        internal float rcsReductionFactor;
         private float rcsOverride = -1;
         private float rcsGCF = 1.0f;
         private static int rcsElevationIndex = -1;
         private float[] rcsElevations = [-90f, -45f, -20f, -10f, -5f, -2.5f, 0f, 2.5f, 5f, 10f, 20f, 45f, 90f];
 
-        private ModuleRadar[] radars;
+        internal ModuleRadar[] radars;
         private GUIContent[] radarsGUI;
         private GUIContent radarBoxText;
         private BDGUIComboBox radarBox;
-        private int previous_index = -1;
-        private string text_detection;
-        private string text_locktrack;
+        internal int previous_index = -1;
+        internal string text_detection;
+        internal string text_locktrack;
         private string text_sonar;
-        private bool bLandedSplashed;
+        internal bool bLandedSplashed;
 
         // Cache variables to avoid regenerating the texture every frame
         private Texture2D cachedPolarPlot = null;
@@ -183,6 +183,12 @@ namespace BDArmory.UI
         }
         void WindowRcs(int windowID)
         {
+            WindowRcsStock(windowID);
+            BDAStealth.EditorPatches.WindowPostfix(this);
+        }
+
+        void WindowRcsStock(int windowID)
+        {
             GUIUtils.PreventClickThrough(windowRect, "BDARCSLOCK");
             if (GUI.Button(new Rect(windowRect.width - 18, 2, 16, 16), " X", BDArmorySetup.CloseButtonStyle))
             {
@@ -279,7 +285,7 @@ namespace BDArmory.UI
             GUI.Label(new Rect(10, 320, 600, 20), "Total radar cross section for vessel: " + RadarUtils.RCSString(rcsOverride > 0 ? rcsOverride * rcsGCF : RadarUtils.rcsTotal * rcsReductionFactor * rcsGCF) + " (with RCS reduction/stealth/ground clutter)", style);
 
             style.fontStyle = FontStyle.Normal;
-            GUI.Label(new Rect(10, 380, 600, 20), "** (Range evaluation not accounting for ECM/countermeasures)", style);
+            GUI.Label(new Rect(10, 380, 600, 20), "** Ranges below follow the Radar & Stealth window rules. ECM on = all jammers on this craft active.", style);
             GUI.Label(new Rect(10, 410, 600, 20), text_detection, style);
             GUI.Label(new Rect(10, 430, 600, 20), text_locktrack, style);
             GUI.Label(new Rect(10, 450, 600, 20), text_sonar, style);
@@ -359,6 +365,12 @@ namespace BDArmory.UI
         }
 
         void takeRadarSnapshot()
+        {
+            takeRadarSnapshotStock();
+            BDAStealth.EditorPatches.SnapshotPostfix(this);
+        }
+
+        void takeRadarSnapshotStock()
         {
             if (EditorLogic.RootPart == null)
                 return;

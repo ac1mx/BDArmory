@@ -168,8 +168,8 @@ namespace BDArmory.Damage
         AttachNode bottom;
         AttachNode top;
 
-        private float hullRadarReturnFactor = 1;
-        private float armorRadarReturnFactor = 1;
+        internal float hullRadarReturnFactor = 1;
+        internal float armorRadarReturnFactor = 1;
 
         public Dictionary<int, Shader> defaultShader = [];
         public Dictionary<int, Color> defaultColor = [];

@@ -72,7 +72,7 @@ namespace BDArmory.UI
         // booleans to track state of buttons affecting everyone
         private bool _teamsAssigned = false;
         private bool _autoPilotEnabled = false;
-        private bool _guardModeEnabled = false;
+        public bool _guardModeEnabled = false;
         public bool vesselTraceEnabled = false;
 
         // Vessel spawning
@@ -259,7 +259,7 @@ namespace BDArmory.UI
             upToDateWMs = true;
         }
 
-        private void ToggleGuardModes()
+        public void ToggleGuardModes()
         {
             _guardModeEnabled = !_guardModeEnabled;
             using (var teamManagers = weaponManagers.GetEnumerator())
@@ -274,7 +274,7 @@ namespace BDArmory.UI
                         }
         }
 
-        private void ToggleAutopilots()
+        public void ToggleAutopilots()
         {
             // toggle the state
             _autoPilotEnabled = !_autoPilotEnabled;

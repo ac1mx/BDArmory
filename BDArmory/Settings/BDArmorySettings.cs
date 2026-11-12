@@ -499,6 +499,9 @@ namespace BDArmory.Settings
 
         #region Missile & Countermeasure Settings
         [BDAPersistentSettingsField] public static bool MISSILE_CM_SETTING_TOGGLE = false;
+        [BDAPersistentSettingsField] public static bool REALISTIC_VISUAL_DETECTION = true;         // Visual range depends on the target's apparent size, lighting, sun glare and exhaust plume; the weapon manager's visual range is the upper limit.
+        [BDAPersistentSettingsField] public static bool VISUAL_BLIND_SPOTS = true;                 // With realistic visual detection: flying craft can't see under their belly or behind and below their tail.
+        [BDAPersistentSettingsField] public static bool VIP_DEATH_ENDS_ROUND = true;               // A competition ends when a team that marked a VIP loses it.
         [BDAPersistentSettingsField] public static bool VARIABLE_MISSILE_VISIBILITY = false;        //missile visual detection range dependant on boost/cruise/post-thrust state
         [BDAPersistentSettingsField] public static bool ASPECTED_RCS = false;                   //RCS evaluated in real-time based on aircraft's aspect
         [BDAPersistentSettingsField] public static float ASPECTED_RCS_OVERALL_RCS_WEIGHT = 0.25f;   //When ASPECTED_RCS = true, final aspected RCS will be = (1-ASPECTED_RCS_OVERALL_RCS_WEIGHT) * [Aspected RCS] + ASPECTED_RCS_OVERALL_RCS_WEIGHT * [Overall RCS]

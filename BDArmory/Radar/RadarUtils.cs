@@ -36,6 +36,19 @@ namespace BDArmory.Radar
 
         private static Texture2D drawTextureVariable;
         public static Texture2D GetTextureVariable { get { return drawTextureVariable; } }
+
+        // All the aspects of one signature render side by side, so that they're read back from the GPU once instead of once per aspect.
+        // A single row, so that the result doesn't depend on which way up the platform reads render targets back.
+        private static RenderTexture rcsAtlas;
+        private static Texture2D rcsAtlasTexture;
+        private static int rcsAtlasAspects;
+        // Materials of the vessel being rendered, switched to the RCS shader once per render (not once per aspect).
+        private static readonly List<Material> rcsMaterials = new List<Material>();
+        private static bool rcsMaterialsPrepared;
+        private static readonly Dictionary<Shader, bool> rcsShaderExcluded = new Dictionary<Shader, bool>();
+        private static readonly int lightDirID = Shader.PropertyToID("_LIGHTDIR"), rcsColorID = Shader.PropertyToID("_RCSCOLOR");
+        // With GameData/BDArmory/PluginData/rcs_check.on present, every aspect is also rendered and read back the old way and the largest difference is logged.
+        private static readonly bool rcsCheckEnabled = System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/rcs_check.on"));
         private static Texture2D drawTexture1;
         public static Texture2D GetTexture1 { get { return drawTexture1; } }
         private static Texture2D drawTexture2;
@@ -260,6 +273,17 @@ namespace BDArmory.Radar
         ///
         /// This appears to cause a rather large amount of memory to be consumed (not actually a leak though).
         /// </summary>
+        /// <summary>Frame in which a signature was last re-rendered after damage, so that only one is done per frame.</summary>
+        public static int lastSignatureRenderFrame = -1;
+
+        /// <summary>
+        /// Render one vessel's radar signature now.
+        /// </summary>
+        public static void UpdateRadarCrossSectionNow(Vessel vessel)
+        {
+            if (vessel != null) GetVesselRadarCrossSection(vessel, true);
+        }
+
         public static void ForceUpdateRadarCrossSections(List<Vessel> vessels = null)
         {
             foreach (var vessel in (vessels == null ? BDATargetManager.LoadedVessels : vessels))
@@ -273,6 +297,13 @@ namespace BDArmory.Radar
         /// Get a vessel radar siganture, including all modifiers (ECM, stealth, ...)
         /// </summary>
         public static TargetInfo GetVesselRadarSignature(Vessel v, bool updateJammers = true)
+        {
+            TargetInfo ti = GetVesselRadarSignatureStock(v, updateJammers);
+            BDAStealth.Patches.SignaturePostfix(v, ti);
+            return ti;
+        }
+
+        static TargetInfo GetVesselRadarSignatureStock(Vessel v, bool updateJammers)
         {
             //1. baseSig = GetVesselRadarCrossSection
             TargetInfo ti = GetVesselRadarCrossSection(v, updateJammers: updateJammers);
@@ -327,6 +358,13 @@ namespace BDArmory.Radar
         }
 
         public static float RCSMatrixEval(float[,] rcsMatrix, float overallRCS, float azAngle, float elAngle)
+        {
+            float result = 0f;
+            if (!BDAStealth.HeatPatches.AspectPrefix(rcsMatrix, overallRCS, azAngle, elAngle, ref result)) return result;
+            return RCSMatrixEvalStock(rcsMatrix, overallRCS, azAngle, elAngle);
+        }
+
+        static float RCSMatrixEvalStock(float[,] rcsMatrix, float overallRCS, float azAngle, float elAngle)
         {
             float rcs;
 
@@ -487,6 +525,18 @@ namespace BDArmory.Radar
             // Run intensive RCS rendering if 1. It has not been done yet, 2. If the competition just started (capture vessel changes such as gear-raise or robotics)
             if (force || ti.radarBaseSignature == -1 || ti.radarBaseSignatureNeedsUpdate || (BDArmorySettings.ASPECTED_RCS && ti.radarSignatureMatrixNeedsUpdate))
             {
+                // In flight, a craft that needs rendering is rendered by its own TargetInfo between frames, not here: this is reached from
+                // radar scans and missile guidance inside the physics step. Until then the previous signature is used, or none at all
+                // for a craft that has never been rendered (it can't be seen on radar for the frame or two that takes).
+                if (!force && HighLogic.LoadedSceneIsFlight && !VesselModuleRegistry.IgnoredVesselTypes.Contains(v.vesselType) && v.IsControllable && ti.RequestSignatureRender())
+                {
+                    if (ti.radarBaseSignature == -1)
+                    {
+                        ti.radarBaseSignature = 0f;
+                        ti.radarSignatureMatrix = null;
+                    }
+                    return ti;
+                }
                 if (BDArmorySettings.DEBUG_RADAR) Debug.Log($"[BDArmory.RadarUtils] Performing RCS Rendering! Vessel: {(v ? v.vesselName : "null")}, with mass: {ti.radarMassAtUpdate}, force: {force}, ti.radarBaseSignature: {ti.radarBaseSignature}, radarBaseSignatureNeedsUpdate: {ti.radarBaseSignatureNeedsUpdate} and radarSignatureMatrixNeedsUpdate: {ti.radarSignatureMatrixNeedsUpdate}.");
 
                 // is it just some debris? then dont bother doing a real rcs rendering and just fake it with the parts mass
@@ -566,6 +616,13 @@ namespace BDArmory.Radar
         /// </summary>
         public static float GetVesselECMJammingDistance(Vessel v)
         {
+            float result = GetVesselECMJammingDistanceStock(v);
+            BDAStealth.JamPatches.JamDistancePostfix(v, ref result);
+            return result;
+        }
+
+        static float GetVesselECMJammingDistanceStock(Vessel v)
+        {
             float jammingDistance = 0f;
 
             if (v == null)
@@ -585,6 +642,13 @@ namespace BDArmory.Radar
         /// </summary>
         /// <param name="inEditorZoom">when true, we try to make the rendered vessel fill the rendertexture completely, for a better detailed view. This does skew the computed cross section, so it is only for a good visual in editor!</param>
         public static TargetInfo RenderVesselRadarSnapshot(Vessel v, Transform t, TargetInfo ti = null, bool inEditorZoom = false)
+        {
+            BDAStealth.Patches.RenderPrefix(v);
+            try { return RenderVesselRadarSnapshotStock(v, t, ti, inEditorZoom); }
+            finally { BDAStealth.Patches.RenderFinalizer(); }
+        }
+
+        static TargetInfo RenderVesselRadarSnapshotStock(Vessel v, Transform t, TargetInfo ti, bool inEditorZoom)
         {
             if (VesselModuleRegistry.IgnoredVesselTypes.Contains(v.vesselType)) Debug.LogError($"[BDArmory.RadarUtils]: Rendering radar snapshot of {v.vesselName}, which should be being ignored!");
             bool aspected = BDArmorySettings.ASPECTED_RCS;
@@ -703,6 +767,31 @@ namespace BDArmory.Radar
                 Array.Resize(ref rcsValues, numAspects);
             Array.Clear(rcsValues, 0, numAspects);
             Vector3 aspect;
+            // In flight, the aspects are rendered into one atlas and read back together; the per-aspect read-back remains for the editor
+            // (which shows the textures) and for platforms that can't copy between render targets.
+            bool useAtlas = HighLogic.LoadedSceneIsFlight && !inEditorZoom && EnsureAtlas(numAspects);
+            float[] checkValues = useAtlas && rcsCheckEnabled ? new float[numAspects] : null;
+            rcsMaterialsPrepared = false;
+            if (useAtlas)
+            {
+                for (int i = 0; i < numAspects; i++)
+                {
+                    aspect = t.TransformDirection(rcsDirArray[i]);
+                    if (checkValues != null)
+                    {
+                        RenderSinglePassLegacy(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, drawTextureVariable);
+                        checkValues[i] = SumPixels(drawTextureVariable.GetPixels32());
+                    }
+                    RenderSinglePass(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, null);
+                    Graphics.CopyTexture(rcsRenderingVariable, 0, 0, 0, 0, radarResolution, radarResolution, rcsAtlas, 0, 0, i * radarResolution, 0);
+                }
+                RenderTexture.active = rcsAtlas;
+                rcsAtlasTexture.ReadPixels(new Rect(0, 0, numAspects * radarResolution, radarResolution), 0, 0);
+                RenderTexture.active = null;
+            }
+            var atlasData = useAtlas ? rcsAtlasTexture.GetRawTextureData<byte>() : default;
+            int atlasWidth = rcsAtlasAspects * radarResolution;
+            float largestDifference = 0f;
             // Loop through all aspects
             for (int i = 0; i < numAspects; i++)
             {
@@ -711,18 +800,29 @@ namespace BDArmory.Radar
                 //aspect = Vector3.RotateTowards(t.up, -t.up, rcsAspects[i, 0] / 180f * Mathf.PI, 0);
                 //aspect = Vector3.RotateTowards(aspect, Vector3.Cross(t.right, t.up), -rcsAspects[i, 1] / 180f * Mathf.PI, 0);
 
-                // Render aspect
-                RenderSinglePass(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, drawTextureVariable);
-
-                // Count pixel colors to determine radar returns
-                rcsVariable = 0;
-
-                pixels = drawTextureVariable.GetPixels32(); // GetPixels causes a memory leak, so we need to go via GetPixels32!
-                for (int pixelIndex = 0; pixelIndex < pixels.Length; ++pixelIndex)
+                if (useAtlas)
                 {
-                    var pixel = pixels[pixelIndex];
-                    var maxColorComponent = Mathf.Max(pixel.r, Mathf.Max(pixel.g, pixel.b));
-                    rcsVariable += (float)maxColorComponent / 255f;
+                    // Count pixel colors in this aspect's tile of the atlas (3 bytes per pixel).
+                    long sum = 0;
+                    for (int y = 0; y < radarResolution; ++y)
+                    {
+                        int index = 3 * (y * atlasWidth + i * radarResolution);
+                        for (int x = 0; x < radarResolution; ++x, index += 3)
+                        {
+                            byte r = atlasData[index], g = atlasData[index + 1], b = atlasData[index + 2];
+                            sum += r > g ? (r > b ? r : b) : (g > b ? g : b);
+                        }
+                    }
+                    rcsVariable = sum / 255f;
+                    if (checkValues != null) largestDifference = Mathf.Max(largestDifference, Mathf.Abs(rcsVariable - checkValues[i]) / Mathf.Max(1f, checkValues[i]));
+                }
+                else
+                {
+                    // Render aspect
+                    RenderSinglePass(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, drawTextureVariable);
+
+                    // Count pixel colors to determine radar returns
+                    rcsVariable = SumPixels(drawTextureVariable.GetPixels32()); // GetPixels causes a memory leak, so we need to go via GetPixels32!
                 }
 
                 // normalize rcs value, so that a sphere with cross section of 1 m^2 gives a return of 1 m^2:
@@ -791,6 +891,8 @@ namespace BDArmory.Radar
                     Debug.Log($"[BDArmory.RadarUtils]: - Vessel rcs for (az/el) is: {rcsAspects[i, 0]}/{rcsAspects[i, 1]} = rcsVariable: {rcsVariable}");
                 }
             }
+
+            if (checkValues != null) Debug.Log($"[BDArmory.RadarUtils]: RCS check {v.vesselName}: {numAspects} aspects, largest relative difference between the atlas and the per-aspect render {largestDifference:G3}");
 
             // Re-size array for overall RCS calc when aspected RCS is enabled
             if (BDArmorySettings.ASPECTED_RCS)
@@ -861,6 +963,7 @@ namespace BDArmory.Radar
                         try
                         {
                             if (r[i].GetComponentInParent<Part>() != parts.Current) continue; // Don't recurse to child parts.
+                            if (r[i].sharedMaterial == null) continue;
                             int key = r[i].material.GetInstanceID();
                             if (!a.defaultShader.ContainsKey(key))
                             {
@@ -899,6 +1002,8 @@ namespace BDArmory.Radar
                     }
                 }
             //}
+            rcsMaterials.Clear();
+            rcsMaterialsPrepared = false;
             // Re-enable rendering of conformal decals.
             if (ConformalDecals.hasConformalDecals)
                 SetConformalDecalRendering(v, true);
@@ -1220,6 +1325,130 @@ namespace BDArmory.Radar
                 radarCam.fieldOfView = radarFOV;
             // setup rendertexture
 
+            if (!rcsMaterialsPrepared) PrepareRadarMaterials(v);
+            Vector4 lightDirection = -cameraDirection;
+            for (int i = 0; i < rcsMaterials.Count; ++i)
+                if (rcsMaterials[i] != null) rcsMaterials[i].SetVector(lightDirID, lightDirection);
+
+            radarCam.targetTexture = rcsRendering;
+            RenderTexture.active = rcsRendering;
+            radarCam.RenderWithShader(BDAShaderLoader.RCSShader, string.Empty);
+            if (rcsTexture != null) // Read back per aspect (editor, or no atlas); otherwise the caller copies the render into the atlas.
+            {
+                rcsTexture.ReadPixels(new Rect(0, 0, radarResolution, radarResolution), 0, 0);
+                rcsTexture.Apply();
+            }
+        }
+
+        /// <summary>
+        /// Switch the vessel's materials to the RCS shader with each part's reflectivity, and remember them: between the aspects of one
+        /// signature render only the light direction changes.
+        /// </summary>
+        private static void PrepareRadarMaterials(Vessel v)
+        {
+            rcsMaterials.Clear();
+            rcsMaterialsPrepared = true;
+            Shader rcsShader = BDAShaderLoader.RCSShader;
+            using (List<Part>.Enumerator parts = (HighLogic.LoadedSceneIsEditor ? EditorLogic.fetch.ship.Parts.GetEnumerator() : v.parts.GetEnumerator()))
+                while (parts.MoveNext())
+                {
+                    HitpointTracker a = parts.Current.GetComponent<HitpointTracker>();
+                    FlagDecal flag = parts.Current.GetComponent<FlagDecal>();
+                    if (flag != null && flag.flagDisplayed) flag.ToggleFlag();
+                    if (parts.Current.GetComponent<KerbalEVA>()) continue; //ignore kerbals
+                    var r = parts.Current.GetComponentsInChildren<Renderer>();
+                    try
+                    {
+                        if (!a.RegisterProcWingShader && parts.Current.name.Contains("B9.Aero.Wing.Procedural"))
+                        {
+                            for (int j = 0; j < r.Length; j++)
+                            {
+                                if (r[j].GetComponentInParent<Part>() != parts.Current) continue; // Don't recurse to child parts.
+                                Material wingMaterial = r[j].material;
+                                int key = wingMaterial.GetInstanceID();
+                                a.defaultShader.Add(key, wingMaterial.shader);
+                                if (wingMaterial.HasProperty("_Color")) a.defaultColor.Add(key, wingMaterial.color);
+                            }
+                            a.RegisterProcWingShader = true;
+                        }
+                        Color reflectivity = new Color(a.radarReflectivity, a.radarReflectivity, a.radarReflectivity, 1f);
+                        for (int i = 0; i < r.Length; i++)
+                        {
+                            if (r[i].sharedMaterial == null) continue;
+                            Material material = r[i].material;
+                            if (!a.defaultShader.ContainsKey(material.GetInstanceID())) continue; // Don't modify shaders that we don't have defaults for as we can't then replace them.
+                            if (r[i].GetComponentInParent<Part>() != parts.Current) continue; // Don't recurse to child parts.
+                            Shader shader = material.shader;
+                            if (shader != rcsShader)
+                            {
+                                if (!rcsShaderExcluded.TryGetValue(shader, out bool excluded))
+                                {
+                                    string shaderName = shader.name;
+                                    excluded = shaderName.Contains("Alpha") || shaderName.Contains("Waterfall") || shaderName.Contains("KSP/Particles");
+                                    rcsShaderExcluded[shader] = excluded;
+                                }
+                                if (excluded) continue;
+                                material.shader = rcsShader;
+                            }
+                            material.SetColor(rcsColorID, reflectivity);
+                            rcsMaterials.Add(material);
+                        }
+                    }
+                    catch
+                    {
+                        Debug.Log("[RadarUtils]: material on " + parts.Current.name + "could not find set RCS shader/color");
+                    }
+                }
+        }
+
+        /// <summary>
+        /// Make sure the atlas can hold the given number of aspects. False if this platform can't do it, in which case each aspect is read back by itself.
+        /// </summary>
+        private static bool EnsureAtlas(int aspects)
+        {
+            if ((SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.RTToTexture) == 0 || aspects * radarResolution > SystemInfo.maxTextureSize) return false;
+            if (rcsAtlas != null && rcsAtlasTexture != null && rcsAtlasAspects >= aspects) return true;
+            if (rcsAtlas != null) RenderTexture.Destroy(rcsAtlas);
+            if (rcsAtlasTexture != null) Texture2D.Destroy(rcsAtlasTexture);
+            rcsAtlasAspects = aspects;
+            rcsAtlas = new RenderTexture(aspects * radarResolution, radarResolution, 0, rcsRenderingVariable.format);
+            rcsAtlas.Create();
+            rcsAtlasTexture = new Texture2D(aspects * radarResolution, radarResolution, TextureFormat.RGB24, false);
+            return true;
+        }
+
+        /// <summary>Radar return of one rendered aspect: the sum over its pixels of the brightest colour component.</summary>
+        private static float SumPixels(Color32[] aspectPixels)
+        {
+            float sum = 0;
+            for (int pixelIndex = 0; pixelIndex < aspectPixels.Length; ++pixelIndex)
+            {
+                var pixel = aspectPixels[pixelIndex];
+                sum += (float)Mathf.Max(pixel.r, Mathf.Max(pixel.g, pixel.b)) / 255f;
+            }
+            return sum;
+        }
+
+        /// <summary>
+        /// The original single pass, which walks every part's renderers for every aspect and reads the render back at once.
+        /// Kept as the reference that the check mode compares the atlas against.
+        /// </summary>
+        private static void RenderSinglePassLegacy(Vessel v, Transform t, bool inEditorZoom, Vector3 cameraDirection, Bounds vesselbounds, float radarDistance, float radarFOV, RenderTexture rcsRendering, Texture2D rcsTexture)
+        {
+            // Render one snapshop pass:
+            // setup camera FOV
+            radarCam.allowMSAA = false; // Don't allow MSAA with RCS render as this significantly affects results!
+            radarCam.transform.position = vesselbounds.center + cameraDirection * radarDistance;
+            radarCam.transform.LookAt(vesselbounds.center, -t.forward);
+            float distanceToShip = Vector3.Distance(radarCam.transform.position, vesselbounds.center);
+            radarCam.nearClipPlane = distanceToShip - 200;
+            radarCam.farClipPlane = distanceToShip + 200;
+            if (inEditorZoom)
+                radarCam.fieldOfView = Mathf.Atan(vesselbounds.size.magnitude / distanceToShip) * 180 / Mathf.PI;
+            else
+                radarCam.fieldOfView = radarFOV;
+            // setup rendertexture
+
             /////////////////
             Color StealthAdjust;
             RCSshader = BDAShaderLoader.RCSShader;
@@ -1399,6 +1628,9 @@ namespace BDArmory.Radar
                 Texture2D.Destroy(drawTexture2);
                 Texture2D.Destroy(drawTexture3);
                 GameObject.Destroy(radarCam);
+                if (rcsAtlas != null) { RenderTexture.Destroy(rcsAtlas); rcsAtlas = null; }
+                if (rcsAtlasTexture != null) { Texture2D.Destroy(rcsAtlasTexture); rcsAtlasTexture = null; }
+                rcsAtlasAspects = 0;
                 rcsSetupCompleted = false;
             }
         }
@@ -1450,6 +1682,13 @@ namespace BDArmory.Radar
         /// Determine how much of an effect enemies that are jamming have on the target
         /// </summary>
         public static float GetStandoffJammingModifier(Vessel v, Competition.BDTeam team, Vector3 position, Vessel targetV, float signature)
+        {
+            float result = 0f;
+            if (!BDAStealth.Patches.StandoffPrefix(v, team, position, targetV, signature, ref result)) return result;
+            return GetStandoffJammingModifierStock(v, team, position, targetV, signature);
+        }
+
+        static float GetStandoffJammingModifierStock(Vessel v, Competition.BDTeam team, Vector3 position, Vessel targetV, float signature)
         {
             if (targetV.ActiveController().WM == null) return 1f; // Don't evaluate SOJ effects for targets without weapons managers
             if (signature == 0) return 1f; // Don't evaluate SOJ effects for targets with 0 signature
@@ -1648,6 +1887,12 @@ namespace BDArmory.Radar
         //was: public static void UpdateRadarLock(Ray ray, float fov, float minSignature, ref TargetSignatureData[] dataArray, float dataPersistTime, bool pingRWR, RadarWarningReceiver.RWRThreatTypes rwrType, bool radarSnapshot)
         public static bool RadarUpdateScanBoresight(Ray ray, float fov, ref TargetSignatureData[] dataArray, float dataPersistTime, ModuleRadar radar)
         {
+            BDAStealth.Patches.EnsureRadarPrefix(radar);
+            return RadarUpdateScanBoresightStock(ray, fov, ref dataArray, dataPersistTime, radar);
+        }
+
+        static bool RadarUpdateScanBoresightStock(Ray ray, float fov, ref TargetSignatureData[] dataArray, float dataPersistTime, ModuleRadar radar)
+        {
             int dataIndex = 0;
             bool hasLocked = false;
 
@@ -1767,6 +2012,13 @@ namespace BDArmory.Radar
         /// </summary>
         //was: UpdateRadarLock(ray, maxOffBoresight, activeRadarMinThresh, ref scannedTargets, 0.4f, true, RadarWarningReceiver.RWRThreatTypes.MissileLock, true);
         public static int RadarUpdateMissileLock(Ray ray, float fov, ref TargetSignatureData[] dataArray, float dataPersistTime, MissileBase missile, bool pingRWR)
+        {
+            BDAStealth.Patches.MissileLockPrefix(ray, missile);
+            try { return RadarUpdateMissileLockStock(ray, fov, ref dataArray, dataPersistTime, missile, pingRWR); }
+            finally { BDAStealth.Patches.PopFinalizer(); }
+        }
+
+        static int RadarUpdateMissileLockStock(Ray ray, float fov, ref TargetSignatureData[] dataArray, float dataPersistTime, MissileBase missile, bool pingRWR)
         {
             int dataIndex = 0;
             //bool hasLocked = false;
@@ -1941,6 +2193,13 @@ namespace BDArmory.Radar
         /// <param name="dataPersistTime">optional, relevant only for modeTryLock=true</param>
         /// <returns></returns>
         public static bool RadarUpdateScanLock(MissileFire myWpnManager, float directionAngle, float elevationAngle, float azFov, float elFov, ModuleRadar radar, bool modeTryLock, ref TargetSignatureData[] dataArray, float dataPersistTime = 0f)
+        {
+            BDAStealth.Patches.ScanLockPrefix(radar);
+            try { return RadarUpdateScanLockStock(myWpnManager, directionAngle, elevationAngle, azFov, elFov, radar, modeTryLock, ref dataArray, dataPersistTime); }
+            finally { BDAStealth.Patches.PopFinalizer(); }
+        }
+
+        static bool RadarUpdateScanLockStock(MissileFire myWpnManager, float directionAngle, float elevationAngle, float azFov, float elFov, ModuleRadar radar, bool modeTryLock, ref TargetSignatureData[] dataArray, float dataPersistTime)
         {
             Vector3 position = radar.currPosition;
             Vector3 forwardVector = radar.currForward;
@@ -2140,6 +2399,13 @@ namespace BDArmory.Radar
         /// </summary>
         //was: public static void UpdateRadarLock(Ray ray, Vector3 predictedPos, float fov, float minSignature, ModuleRadar radar, bool pingRWR, bool radarSnapshot, float dataPersistTime, bool locked, int lockIndex, Vessel lockedVessel)
         public static bool RadarUpdateLockTrack(Ray ray, Vector3 predictedPos, float fov, ModuleRadar radar, float dataPersistTime, bool locked, int lockIndex, Vessel lockedVessel)
+        {
+            BDAStealth.Patches.LockTrackPrefix(ray, radar, locked, lockedVessel);
+            try { return RadarUpdateLockTrackStock(ray, predictedPos, fov, radar, dataPersistTime, locked, lockIndex, lockedVessel); }
+            finally { BDAStealth.Patches.PopFinalizer(); }
+        }
+
+        static bool RadarUpdateLockTrackStock(Ray ray, Vector3 predictedPos, float fov, ModuleRadar radar, float dataPersistTime, bool locked, int lockIndex, Vessel lockedVessel)
         {
             float closestSqrDist = 1000f;
 
@@ -2548,6 +2814,13 @@ namespace BDArmory.Radar
                         }
 
                         if (missileBase.SourceVessel == myWpnManager.vessel) continue; // ignore missiles we've fired
+                        float missileViewDistance = maxViewDistance;
+                        if (BDArmorySettings.REALISTIC_VISUAL_DETECTION)
+                        {
+                            var visual = myWpnManager.VisualSample(loadedvessels.Current, missileBase);
+                            if (visual.blocked) continue;
+                            missileViewDistance = Mathf.Min(maxViewDistance, visual.range);
+                        }
                         float sightDistance = 0;
 
                         // Have we detected the missile with MWS?
@@ -2567,7 +2840,7 @@ namespace BDArmory.Radar
 
                             //thrusting missiles at full range, cruising missiles at 3/4ths range, coasting missiles at 1/3rd range?
                             //or have be hard cutoffs, e.g. 5km/4km/2.5km, etc?
-                            sightDistance = BDArmorySettings.VARIABLE_MISSILE_VISIBILITY ? maxViewDistance * (missileBase.MissileState == MissileBase.MissileStates.Boost ? 1 : (missileBase.MissileState == MissileBase.MissileStates.Cruise ? 0.75f : 0.33f)) : maxViewDistance;
+                            sightDistance = BDArmorySettings.REALISTIC_VISUAL_DETECTION ? missileViewDistance : BDArmorySettings.VARIABLE_MISSILE_VISIBILITY ? maxViewDistance * (missileBase.MissileState == MissileBase.MissileStates.Boost ? 1 : (missileBase.MissileState == MissileBase.MissileStates.Cruise ? 0.75f : 0.33f)) : maxViewDistance;
 
                             // Check if there's a point to checking visual detection
                             if (vesselDistanceSqr < sightDistance * sightDistance)
@@ -2615,7 +2888,7 @@ namespace BDArmory.Radar
                                 // This does leave radar missiles in a weird spot where a RWR-less
                                 // vessel can tell it's a radar missile from > ID range...
                                 case MissileBase.TargetingModes.Heat:
-                                    if (MWSDetected || vesselDistanceSqr < 0.1089f * maxViewDistance * maxViewDistance)
+                                    if (MWSDetected || vesselDistanceSqr < 0.1089f * missileViewDistance * missileViewDistance)
                                         results.foundHeatMissile = true;
                                     else
                                         results.foundPassiveMissile = true;
@@ -2627,14 +2900,14 @@ namespace BDArmory.Radar
                                     results.foundAGM = true;
                                     break;
                                 case MissileBase.TargetingModes.AntiRad: //How does one differentiate between a passive IR sensor and a passive AR sensor?
-                                    if (MWSDetected || vesselDistanceSqr < 0.1089f * maxViewDistance * maxViewDistance)
+                                    if (MWSDetected || vesselDistanceSqr < 0.1089f * missileViewDistance * missileViewDistance)
                                         results.foundAntiRadiationMissile = true; //admittedly, combining the two would result in launching flares at ARMs and turning off radar when having incoming heaters...
                                     else
                                         results.foundPassiveMissile = true;
                                     break;
                                 case MissileBase.TargetingModes.Gps:
                                 case MissileBase.TargetingModes.Inertial:
-                                    if (MWSDetected || vesselDistanceSqr < 0.1089f * maxViewDistance * maxViewDistance)
+                                    if (MWSDetected || vesselDistanceSqr < 0.1089f * missileViewDistance * missileViewDistance)
                                         results.foundGPSMissile = true;
                                     else
                                         results.foundPassiveMissile = true;
@@ -2713,6 +2986,15 @@ namespace BDArmory.Radar
             return results;
         }
 
+        /// <summary>
+        /// A radar missile that is holding a track on some other vessel only endangers us if its path actually comes close,
+        /// which the closest approach checks cover; merely being inside its seeker's field of view isn't a reason to evade.
+        /// </summary>
+        static bool TrackingAnotherVessel(MissileBase missile, Vessel self)
+        {
+            return !missile.radarLOALSearching && missile.radarTarget.exists && missile.radarTarget.vessel != null && missile.radarTarget.vessel != self;
+        }
+
         public static bool MissileIsThreat(MissileBase missile, MissileFire mf, bool threatToMeOnly = true, bool ignoreInterceptors = false)
         {
             if (missile == null || missile.part == null) return false;
@@ -2735,7 +3017,7 @@ namespace BDArmory.Radar
                             (
                                 (missile.TargetPosition - (mf.vessel.CoM + (mf.vessel.Velocity() * Time.fixedDeltaTime))).sqrMagnitude < missileBlastRadiusSqr || // Target position is within blast radius of missile.
                                 mf.vessel.PredictClosestApproachSqrSeparation(missile.vessel, Mathf.Max(mf.cmThreshold, mf.evadeThreshold)) < missileBlastRadiusSqr || // Closest approach is within blast radius of missile. 
-                                ((missile.TargetingMode == MissileBase.TargetingModes.Radar && !teammate) && (VectorUtils.Angle(missile.TargetPosition - missile.vessel.CoM, vectorFromMissile) <= (missile.radarLOALSearching ? missile.maxOffBoresight : missile.lockedSensorFOV * 0.5f))) // We are within radar FOV of missile boresight.
+                                ((missile.TargetingMode == MissileBase.TargetingModes.Radar && !teammate && !TrackingAnotherVessel(missile, mf.vessel)) && (VectorUtils.Angle(missile.TargetPosition - missile.vessel.CoM, vectorFromMissile) <= (missile.radarLOALSearching ? missile.maxOffBoresight : missile.lockedSensorFOV * 0.5f))) // We are within radar FOV of missile boresight.
                             ));
             }
             else

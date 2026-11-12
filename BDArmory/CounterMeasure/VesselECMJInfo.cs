@@ -10,9 +10,9 @@ namespace BDArmory.CounterMeasure
 {
     public class VesselECMJInfo : MonoBehaviour
     {
-        List<ModuleECMJammer> jammers;
+        internal List<ModuleECMJammer> jammers;
         public Vessel vessel;
-        private TargetInfo ti;
+        internal TargetInfo ti;
         bool jEnabled;
         bool cleaningRequired = false;
 
@@ -35,7 +35,7 @@ namespace BDArmory.CounterMeasure
             get { return lbs; }
         }
 
-        float rcsr;
+        internal float rcsr;
 
         public float rcsReductionFactor
         {
@@ -114,6 +114,12 @@ namespace BDArmory.CounterMeasure
         }
 
         public void UpdateJammerStrength(TargetInfo tInfoIn = null)
+        {
+            UpdateJammerStrengthStock(tInfoIn);
+            BDAStealth.Patches.JammerPostfix(this);
+        }
+
+        void UpdateJammerStrengthStock(TargetInfo tInfoIn)
         {
             if (jammers is null && !Setup())
             {

@@ -13,6 +13,7 @@ namespace BDArmory.Settings
         public static BDInputInfo WEAP_PREV_KEY = new BDInputInfo("Prev Weapon");
         public static BDInputInfo WEAP_TOGGLE_ARMED_KEY = new BDInputInfo("Toggle Armed");
         public static BDInputInfo WEAP_TOGGLE_HMD_KEY = new BDInputInfo("Toggle HMD");
+        public static BDInputInfo WEAP_FIRE_CM = new BDInputInfo("Fire Countermeasures");
 
         //TGP
         public static BDInputInfo TGP_SLEW_RIGHT = new BDInputInfo("[6]", "Slew Right");

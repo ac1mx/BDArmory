@@ -45,6 +45,7 @@ namespace BDArmory.CounterMeasure
         public void Chaff()
         {
             chaffScalar = Mathf.Clamp(chaffScalar - chaffSubtractor, 0, chaffMax);
+            BDAStealth.ChaffPatches.ChaffPostfix(this);
         }
 
         void FixedUpdate()

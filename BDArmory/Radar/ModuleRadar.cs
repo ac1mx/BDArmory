@@ -15,7 +15,7 @@ using BDArmory.WeaponMounts;
 
 namespace BDArmory.Radar
 {
-    public class ModuleRadar : BDAPartModule
+    public partial class ModuleRadar : BDAPartModule
     {
         #region KSPFields (Part Configuration)
 
@@ -268,7 +268,7 @@ namespace BDArmory.Radar
 
         private TargetSignatureData[] attemptedLocks;
         //private bool[] lockSuccesses; // Removed as it was deemed unecessary
-        private List<TargetSignatureData> lockedTargets;
+        internal List<TargetSignatureData> lockedTargets;
 
         public TargetSignatureData lockedTarget
         {
@@ -837,6 +837,12 @@ namespace BDArmory.Radar
 
         void FixedUpdate()
         {
+            BDAStealth.HeatPatches.RadarChaffPrefix(this);
+            FixedUpdateStock();
+        }
+
+        void FixedUpdateStock()
+        {
             if (HighLogic.LoadedSceneIsFlight && FlightGlobals.ready && startupComplete)
             {
                 if (!vessel.IsControllable && radarEnabled)
@@ -1013,6 +1019,13 @@ namespace BDArmory.Radar
         }
 
         public bool TryLockTarget(Vector3 position, Vessel targetVessel = null)
+        {
+            bool result = TryLockTargetStock(position, targetVessel);
+            BDAStealth.JamPatches.TryLockPostfix(this, targetVessel, result);
+            return result;
+        }
+
+        bool TryLockTargetStock(Vector3 position, Vessel targetVessel)
         {
             //need a way to see what companion radars on the craft have already locked, so multiple radars aren't stacking locks on the same couple target craft? Or is updating attemptedLocks to missileFire.maxradarLocks enough?
             if (!canLock)
@@ -1565,6 +1578,13 @@ namespace BDArmory.Radar
 
         // RMB info in editor
         public override string GetInfo()
+        {
+            string info = GetInfoStock();
+            BDAStealth.Patches.RadarInfoPostfix(this, ref info);
+            return info;
+        }
+
+        string GetInfoStock()
         {
             bool isLinkOnly = (canReceiveRadarData && !canScan && !canLock);
 

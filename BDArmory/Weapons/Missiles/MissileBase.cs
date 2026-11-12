@@ -803,6 +803,13 @@ namespace BDArmory.Weapons.Missiles
 
         public Vector3d UpdateGPSTarget()
         {
+            BDAStealth.JamPatches.LinkPrefix(this);
+            try { return UpdateGPSTargetStock(); }
+            finally { BDAStealth.JamPatches.LinkFinalizer(); }
+        }
+
+        Vector3d UpdateGPSTargetStock()
+        {
             Vector3 gpsTargetCoords_;
 
             if (gpsSet && assignedGPSCoords != null)
@@ -1082,6 +1089,82 @@ namespace BDArmory.Weapons.Missiles
 
         protected void UpdateRadarTarget()
         {
+            BDAStealth.HeatPatches.MissileChaffPrefix(this, out float chaffState);
+            try
+            {
+                UpdateRadarTargetStock();
+                BDAStealth.ChaffPatches.RadarTargetPostfix(this);
+            }
+            finally { BDAStealth.HeatPatches.MissileChaffFinalizer(this, chaffState); }
+        }
+
+        /// <summary>
+        /// Aim point error from guiding on another radar's lock. A return well above what that radar needs to hold a lock gives a clean
+        /// track; one that only just clears it (long range, small or reduced signature) wanders, by up to 2% of the missile's distance
+        /// to the target, so the missile spends energy chasing the wander until its own seeker takes over.
+        /// </summary>
+        #region Shot record
+        // With the pilot AI's metrics log enabled, each missile logs the geometry it was launched in and how close it got to the vessel it
+        // was launched at, so that launch rules can be judged by what the shots actually did.
+        Vessel shotTarget;
+        string shotLaunch;
+        float shotMinDistance = float.MaxValue, shotMinDistanceTime;
+        bool shotLogged;
+
+        protected void RecordShotLaunch()
+        {
+            if (!BDArmory.Control.BDModulePilotAI.steeringMetricsEnabled || vessel == null) return;
+            shotTarget = targetVessel != null ? targetVessel.Vessel : null;
+            if (shotTarget == null) { shotLaunch = null; return; }
+            Vector3 toTarget = shotTarget.CoM - vessel.CoM;
+            float range = toTarget.magnitude;
+            Vector3 line = toTarget / Mathf.Max(range, 1f);
+            float closure = Vector3.Dot(vessel.Velocity() - shotTarget.Velocity(), line);
+            float aspect = VectorUtils.Angle(shotTarget.srf_vel_direction, -line); // 0 = coming straight at the launcher, 180 = running away.
+            float offBoresight = VectorUtils.Angle(GetForwardTransform(), line);
+            var dlz = MissileLaunchParams.GetDynamicLaunchParams(this, shotTarget.Velocity(), shotTarget.CoM);
+            shotLaunch = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "missile={0} mode={1} from={2} at={3} range={4:F0} maxRange={5:F0} rangeFraction={6:F2} closure={7:F0} aspect={8:F0} offBoresight={9:F0} launchAlt={10:F0} targetAlt={11:F0} launchSpeed={12:F0} targetSpeed={13:F0} estimate={14:F2}",
+                shortName, TargetingMode, SourceVessel != null ? SourceVessel.vesselName : "?", shotTarget.vesselName, range, dlz.maxLaunchRange, range / Mathf.Max(1f, dlz.maxLaunchRange),
+                closure, aspect, offBoresight, vessel.radarAltitude, shotTarget.radarAltitude, vessel.srfSpeed, shotTarget.srfSpeed, BDArmory.Control.ShotModel.Estimate(this, vessel, shotTarget));
+        }
+
+        protected void TrackShot()
+        {
+            if (shotLaunch == null || shotTarget == null || vessel == null) return;
+            float distance = (shotTarget.CoM - vessel.CoM).magnitude;
+            if (distance < shotMinDistance) { shotMinDistance = distance; shotMinDistanceTime = TimeIndex; }
+        }
+
+        protected void RecordShotResult()
+        {
+            if (shotLaunch == null || shotLogged) return;
+            shotLogged = true;
+            bool targetGone = shotTarget == null || shotTarget.state == Vessel.State.DEAD;
+            Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[BDArmory.MissileBase]: MissileShot {0} minDistance={1:F0} blastRadius={2:F0} hit={3} timeToClosest={4:F1} flightTime={5:F1} endAlt={6:F0} targetDestroyed={7}",
+                shotLaunch, shotMinDistance, GetBlastRadius(), shotMinDistance <= GetBlastRadius(), shotMinDistanceTime, TimeIndex, vessel != null ? vessel.radarAltitude : -1, targetGone));
+        }
+        #endregion
+
+        // Counts of the radar guidance fallbacks, for the pilot AI's metrics log.
+        public static int radarCoastCount, seekerHandBackCount, noisyLockTicks;
+
+        Vector3 LockQualityError(TargetSignatureData track, ModuleRadar lockingRadar)
+        {
+            if (lockingRadar == null || lockingRadar.sonarMode != ModuleRadar.SonarModes.None) return Vector3.zero;
+            float needed = lockingRadar.radarLockTrackCurve.Evaluate((track.position - lockingRadar.transform.position).magnitude / 1000f);
+            if (needed <= 0) return Vector3.zero;
+            float shortfall = Mathf.Clamp01(2f - track.signalStrength / needed); // 0 with twice the needed return or more, 1 right at the limit.
+            if (shortfall <= 0) return Vector3.zero;
+            ++noisyLockTicks;
+            float amplitude = 0.02f * shortfall * (track.position - transform.position).magnitude;
+            float time = Time.time, seed = GetInstanceID() & 0xFF;
+            return amplitude * new Vector3(2f * Mathf.PerlinNoise(time, seed) - 1f, 2f * Mathf.PerlinNoise(time, seed + 17.3f) - 1f, 2f * Mathf.PerlinNoise(time, seed + 41.7f) - 1f);
+        }
+
+        void UpdateRadarTargetStock()
+        {
             TargetAcquired = false;
 
             if (radarTarget.exists)
@@ -1146,7 +1229,8 @@ namespace BDArmory.Weapons.Missiles
                             ModuleRadar lockingRadar = t.lockedByRadar;
                             TargetPosition = radarTarget.predictedPositionWithChaffFactor(!ActiveRadar ? lockingRadar.radarChaffClutterFactor * chaffEffectivity : chaffEffectivity,
                                                                                           !ActiveRadar ? lockingRadar._radarChaffNotchVFac * chaffNotchVFac : chaffNotchVFac,
-                                                                                          !ActiveRadar ? lockingRadar._radarChaffNotchRFac * chaffNotchRFac : chaffNotchRFac);
+                                                                                          !ActiveRadar ? lockingRadar._radarChaffNotchRFac * chaffNotchRFac : chaffNotchRFac)
+                                             + LockQualityError(radarTarget, lockingRadar);
                             TargetVelocity = radarTarget.velocity;
                             TargetAcceleration = radarTarget.acceleration;
                             targetVessel = t.targetInfo; //reset targetvessel in case of canRelock getting a new target
@@ -1156,7 +1240,7 @@ namespace BDArmory.Weapons.Missiles
                         }
                         else
                         {
-                            if (_lockFailTimer > 0f)
+                            if (_lockFailTimer > seekerTimeout) // Fly on the last known track for as long as the seeker would hold a lost target, giving the radar time to lock again.
                             {
                                 if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} with UUID: {vessel.id}: Semi-Active Radar guidance failed. Parent radar lost target.");
                                 radarTarget = TargetSignatureData.noTarget;
@@ -1185,10 +1269,22 @@ namespace BDArmory.Weapons.Missiles
                     }
                     else
                     {
-                        if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} with UUID: {vessel.id}: Semi-Active Radar guidance failed. Out of range and no data feed.");
-                        radarTarget = TargetSignatureData.noTarget;
-                        targetVessel = null;
-                        return;
+                        // The launching radar has no lock at all. As above, fly on the last known track for a while instead of giving up at once.
+                        if (vrd == null || _lockFailTimer > seekerTimeout)
+                        {
+                            if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} with UUID: {vessel.id}: Semi-Active Radar guidance failed. Out of range and no data feed.");
+                            radarTarget = TargetSignatureData.noTarget;
+                            targetVessel = null;
+                            return;
+                        }
+                        if (_lockFailTimer <= 0) { hasLostLock = true; ++radarCoastCount; }
+                        _lockFailTimer = Mathf.Max(_lockFailTimer, 0f) + Time.fixedDeltaTime;
+                        radarTarget.timeAcquired = Time.time;
+                        radarTarget.position = radarTarget.predictedPosition;
+                        TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                        TargetVelocity = radarTarget.velocity;
+                        TargetAcceleration = Vector3.zero;
+                        TargetAcquired = true;
                     }
                 }
                 else //onboard radar is on, or off but in range
@@ -1319,6 +1415,25 @@ namespace BDArmory.Weapons.Missiles
                                 }
                                 locksCount++;
                             }
+                        }
+                    }
+
+                    // The seeker doesn't have the target. If the launching radar still has it locked, fly on that track instead of searching
+                    // blind or giving up; the seeker gets another look next frame.
+                    if (FiredByWM != null && FiredByWM.vesselRadarData != null && FiredByWM.vesselRadarData.locked && radarTarget.vessel != null)
+                    {
+                        (TargetSignatureData parentTrack, bool parentLocked) = FiredByWM.vesselRadarData.detectedRadarTargetLock(radarTarget.vessel, FiredByWM);
+                        if (parentLocked && parentTrack.exists)
+                        {
+                            radarTarget = parentTrack;
+                            ++seekerHandBackCount;
+                            TargetAcquired = true;
+                            TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                            TargetVelocity = radarTarget.velocity;
+                            TargetAcceleration = radarTarget.acceleration;
+                            _lockFailTimer = 0;
+                            if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} with UUID: {vessel.id}: seeker lost {radarTarget.Name()}, guiding on the launching radar's lock.");
+                            return;
                         }
                     }
 
@@ -1636,6 +1751,23 @@ namespace BDArmory.Weapons.Missiles
         private bool setInertialTarget = false;
 
         public Vector3d UpdateInertialTarget()
+        {
+            BDAStealth.JamPatches.LinkPrefix(this);
+            BDAStealth.HeatPatches.MissileChaffPrefix(this, out float chaffState);
+            try
+            {
+                Vector3d result = UpdateInertialTargetStock();
+                BDAStealth.ChaffPatches.InertialTargetPostfix(this);
+                return result;
+            }
+            finally
+            {
+                BDAStealth.HeatPatches.MissileChaffFinalizer(this, chaffState);
+                BDAStealth.JamPatches.LinkFinalizer();
+            }
+        }
+
+        Vector3d UpdateInertialTargetStock()
         {
             Vector3 TargetCoords_;
             Vector3 TargetLead;

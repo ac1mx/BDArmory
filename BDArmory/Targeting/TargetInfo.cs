@@ -274,6 +274,27 @@ namespace BDArmory.Targeting
             BDATargetManager.RemoveTarget(this);
         }
 
+        /// <summary>
+        /// Have the radar signature rendered between frames (one vessel per frame). False if that can't be arranged, in which case the
+        /// caller has to render it itself.
+        /// </summary>
+        public bool RequestSignatureRender()
+        {
+            if (!isActiveAndEnabled || vessel == null) return false;
+            if (!alreadyScheduledRCSUpdate) StartCoroutine(RenderSignatureDeferred());
+            return true;
+        }
+
+        IEnumerator RenderSignatureDeferred()
+        {
+            alreadyScheduledRCSUpdate = true;
+            yield return null; // Out of the physics step that asked for it.
+            while (Time.frameCount == BDArmory.Radar.RadarUtils.lastSignatureRenderFrame) yield return null;
+            if (vessel == null || !vessel.loaded) { alreadyScheduledRCSUpdate = false; yield break; }
+            BDArmory.Radar.RadarUtils.lastSignatureRenderFrame = Time.frameCount;
+            BDArmory.Radar.RadarUtils.UpdateRadarCrossSectionNow(vessel);
+        }
+
         IEnumerator UpdateRCSDelayed()
         {
             if (radarMassAtUpdate > 0)
@@ -284,8 +305,15 @@ namespace BDArmory.Targeting
                 {
                     alreadyScheduledRCSUpdate = true;
                     yield return new WaitForSeconds(1.0f);    // Wait for any explosions to finish
+                    // Render the new signature here, between frames and one vessel per frame, with the old signature in use until then.
+                    // Setting the flags and leaving the render to whoever next asks for the signature put it inside a physics step
+                    // (typically a missile's guidance), with every vessel damaged by the same explosion rendered in that one step.
+                    while (Time.frameCount == BDArmory.Radar.RadarUtils.lastSignatureRenderFrame) yield return null;
+                    if (vessel == null || !vessel.loaded) { alreadyScheduledRCSUpdate = false; yield break; }
+                    BDArmory.Radar.RadarUtils.lastSignatureRenderFrame = Time.frameCount;
                     radarBaseSignatureNeedsUpdate = true;     // Update RCS if vessel mass changed by more than 2.5% after a part was lost
                     radarSignatureMatrixNeedsUpdate = true;
+                    BDArmory.Radar.RadarUtils.UpdateRadarCrossSectionNow(vessel);
                     if (BDArmorySettings.DEBUG_RADAR) Debug.Log("[BDArmory.TargetInfo]: RCS mass update triggered for " + vessel.vesselName + ", difference: " + (massPercentageDifference * 100f).ToString("0.0"));
                 }
             }

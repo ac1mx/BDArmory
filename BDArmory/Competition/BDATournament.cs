@@ -1646,7 +1646,7 @@ namespace BDArmory.Competition
                 vesselsPerTeam = tournamentState.vesselsPerTeam;
                 fullTeams = tournamentState.fullTeams;
                 numberOfRounds = tournamentState.tournamentRoundType == TournamentRoundType.Ranked ? BDArmorySettings.TOURNAMENT_ROUNDS + 1 : tournamentState.rounds.Count;
-                numberOfHeats = numberOfRounds > 0 ? tournamentState.rounds[0].Count : 0;
+                numberOfHeats = numberOfRounds > 0 && tournamentState.rounds.TryGetValue(0, out var firstRound) ? firstRound.Count : 0;
                 heatsRemaining = tournamentState.rounds.Select(r => r.Value.Count).Sum() - tournamentState.completed.Select(c => c.Value.Count).Sum() + (tournamentState.tournamentRoundType == TournamentRoundType.Ranked ? (BDArmorySettings.TOURNAMENT_ROUNDS + 1 - tournamentState.rounds.Count) * tournamentState.rounds.First().Value.Count : 0);
             }
             else

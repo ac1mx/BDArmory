@@ -203,6 +203,13 @@ namespace BDArmory.CounterMeasure
         // RMB info in editor
         public override string GetInfo()
         {
+            string info = GetInfoStock();
+            BDAStealth.Patches.JammerInfoPostfix(this, ref info);
+            return info;
+        }
+
+        string GetInfoStock()
+        {
             StringBuilder output = new StringBuilder();
             output.AppendLine($"EC/sec: {resourceDrain}");
             output.AppendLine($"Always on: {alwaysOn}");

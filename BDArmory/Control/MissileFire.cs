@@ -25,7 +25,7 @@ using static BDArmory.Weapons.ModuleWeapon;
 
 namespace BDArmory.Control
 {
-    public class MissileFire : BDAPartModule
+    public partial class MissileFire : BDAPartModule
     {
         #region Declarations
 
@@ -444,6 +444,8 @@ namespace BDArmory.Control
         }
         // Use: "var pilotAI = PilotAI;" to get a local copy for repeated use. If multiple types are needed in the same block, use the switch pattern in ActiveController.
         BDModulePilotAI PilotAI { get { var ai = AI; return ai != null && ai.pilotEnabled && ai.aiType == AIType.PilotAI ? ai as BDModulePilotAI : null; } }
+        /// <summary>Preference for keeping the current target: the target bias setting, or the pilot's commitment if that's stronger.</summary>
+        public float CommittedTargetBias { get { var pilotAI = PilotAI; return pilotAI != null ? pilotAI.TargetCommitment(targetBias) : targetBias; } }
         BDModuleSurfaceAI SurfaceAI { get { var ai = AI; return ai != null && ai.pilotEnabled && ai.aiType == AIType.SurfaceAI ? ai as BDModuleSurfaceAI : null; } }
 
         public float timeBombReleased;
@@ -604,7 +606,7 @@ namespace BDArmory.Control
         public float incomingMissTime;
         public float incomingThreatDistanceSqr;
         public Vessel priorGunThreatVessel = null;
-        private ViewScanResults results;
+        internal ViewScanResults results;
 
         public bool debilitated = false;
 
@@ -1757,6 +1759,7 @@ namespace BDArmory.Control
                     if (BDInputUtils.GetKeyDown(BDInputSettingsFields.WEAP_TOGGLE_ARMED_KEY)) ToggleArm();
                     if (BDInputUtils.GetKeyDown(BDInputSettingsFields.TGP_SELECT_NEXT_GPS_TARGET)) SelectNextGPSTarget();
                     if (BDInputUtils.GetKeyDown(BDInputSettingsFields.WEAP_TOGGLE_HMD_KEY)) ToggleHMD();
+                    if (BDInputUtils.GetKeyDown(BDInputSettingsFields.WEAP_FIRE_CM)) DropCMs(7); // flares, chaff and smoke
 
                     //firing missiles and rockets===
                     if (selectedWeapon != null &&
@@ -4164,7 +4167,8 @@ namespace BDArmory.Control
             if (rwr && (rwr.omniDetection || (!rwr.omniDetection && ml.TargetingMode == MissileBase.TargetingModes.Radar && ml.ActiveRadar) || _irstsEnabled)) //omni RWR detection, radar spike from lock, or IR spike from launch
                 detectedLaunch = true;
 
-            if (distance < (detectedLaunch ? this.guardRange : this.guardRange / 3))
+            float visualRange = ml != null && ml.vessel != null ? VisualRangeTo(ml.vessel, ml) : NominalVisualRange;
+            if (distance < (detectedLaunch ? visualRange : visualRange / 3))
             {
                 warningSounding = true;
                 BDArmorySetup.Instance.missileWarningTime = Time.time;
@@ -4212,6 +4216,11 @@ namespace BDArmory.Control
         }
 
         public void FireECM(float duration)
+        {
+            if (BDAStealth.JamPatches.FireEcmPrefix(this)) FireECMStock(duration);
+        }
+
+        void FireECMStock(float duration)
         {
             if (!isECMJamming)
             {
@@ -4625,7 +4634,7 @@ namespace BDArmory.Control
             return true;
         }
 
-        void FireMissile()
+        public void FireMissile()
         {
             if (weaponIndex == 0)
             {
@@ -6228,8 +6237,8 @@ namespace BDArmory.Control
                 targetWeightThreat * targetThreatValue +
                 targetWeightAoD * targetAoDValue +
                 targetWeightProtectTeammate * targetProtectTeammateValue +
-                targetWeightProtectVIP * targetProtectVIPValue +
-                targetWeightAttackVIP * targetAttackVIPValue +
+                VIPTracker.ProtectWeight(this) * targetProtectVIPValue +
+                VIPTracker.AttackWeight(this) * targetAttackVIPValue +
                 targetWeightUncontrolled * targetUncontrolledValue);
 
             // Update GUI
@@ -8421,6 +8430,24 @@ namespace BDArmory.Control
         /// <param name="checkForstaleTarget"></param>
         /// <param name="setStaleTarget"></param>
         /// <returns></returns>
+        readonly VisualDetection.Cache visualDetectionCache = new VisualDetection.Cache();
+        /// <summary>
+        /// How far this vessel's crew can currently see the given vessel, and whether the planet is in the way.
+        /// </summary>
+        public VisualDetection.Sample VisualSample(Vessel target, MissileBase missile = null) => visualDetectionCache.Get(vessel, target, missile);
+        public int VisualBlindSpotSamples => visualDetectionCache.blindSpotSamples;
+        /// <summary>How far away the given vessel can be seen from here, with the visual range setting as the upper limit.</summary>
+        public float VisualRangeTo(Vessel target, MissileBase missile = null)
+        {
+            if (!BDArmorySettings.REALISTIC_VISUAL_DETECTION || target == null) return guardRange;
+            var visual = VisualSample(target, missile);
+            return visual.blocked ? 0f : Mathf.Min(guardRange, visual.range);
+        }
+        /// <summary>Visual range where no particular target is in question.</summary>
+        public float NominalVisualRange => BDArmorySettings.REALISTIC_VISUAL_DETECTION ? Mathf.Min(guardRange, VisualDetection.nominalRange) : guardRange;
+        float IncomingMissileIdRange => 0.33f * (incomingMissileVessel != null ? VisualRangeTo(incomingMissileVessel, VesselModuleRegistry.GetMissileBase(incomingMissileVessel)) : NominalVisualRange);
+        public int VisualBlockedSamples => visualDetectionCache.blockedSamples;
+
         public TargetVisibility CanSeeTarget(TargetInfo target, bool checkForNonVisualDetection = true, bool checkForstaleTarget = true)
         {
             // fix cheating: we can see a target IF we either have a visual on it, OR it has been detected on radar/sonar/IRST
@@ -8474,6 +8501,13 @@ namespace BDArmory.Control
             }
             //Can the target be seen?
             float visDistance = guardRange;
+            bool blockedByBody = false;
+            if (BDArmorySettings.REALISTIC_VISUAL_DETECTION)
+            {
+                var visual = VisualSample(target.Vessel, target.isMissile ? target.MissileBaseModule : null);
+                visDistance = Mathf.Min(visDistance, visual.range);
+                blockedByBody = visual.blocked;
+            }
             if (BDArmorySettings.UNDERWATER_VISION && (this.vessel.IsUnderwater() || target.Vessel.IsUnderwater())) visDistance = 100;
             visDistance *= viewModifier;
             float objectPermanenceThreshold = (target.Vessel.LandedOrSplashed && target.Vessel.srfSpeed < 10) ? 30 * (10 - (float)target.Vessel.srfSpeed) : 30; //have slow/stationary targets have much longer timeouts since they are't going anywhere.
@@ -8502,7 +8536,7 @@ namespace BDArmory.Control
                 }
                 else//target/vessel is flying, or ground Vees are within 1.5km of each other, standard LoS checks
                 {
-                    if (RadarUtils.TerrainCheck((vessel.LandedOrSplashed ? target.Vessel.CoM + (vessel.up * (target.Vessel.vesselSize.y / 2)) : target.Vessel.CoM), vessel.CoM, FlightGlobals.currentMainBody))
+                    if (blockedByBody || RadarUtils.TerrainCheck((vessel.LandedOrSplashed ? target.Vessel.CoM + (vessel.up * (target.Vessel.vesselSize.y / 2)) : target.Vessel.CoM), vessel.CoM, FlightGlobals.currentMainBody))
                     {
                         if (!checkForstaleTarget) return TargetVisibility.NotVisible;
                         if (target.detectedTime.TryGetValue(Team, out float detectedTime) && Time.time - detectedTime < Mathf.Max(objectPermanenceThreshold, targetScanInterval))
@@ -8548,7 +8582,13 @@ namespace BDArmory.Control
         {
             // can we get a visual sight of the target?
             float visrange = guardRange;
-            if (BDArmorySettings.VARIABLE_MISSILE_VISIBILITY)
+            if (BDArmorySettings.REALISTIC_VISUAL_DETECTION)
+            {
+                var visual = VisualSample(target.vessel, target);
+                if (visual.blocked) return false;
+                visrange = Mathf.Min(visrange, visual.range);
+            }
+            else if (BDArmorySettings.VARIABLE_MISSILE_VISIBILITY)
             {
                 visrange *= target.MissileState == MissileBase.MissileStates.Boost ? 1 : (target.MissileState == MissileBase.MissileStates.Cruise ? 0.75f : 0.33f);
             }
@@ -9235,7 +9275,7 @@ namespace BDArmory.Control
                                 {
                                     launchAuthorized = false;
                                 }
-                                else if (targetDistance >= dlz.maxLaunchRange || targetDistance <= dlz.minLaunchRange)  //fire the missile only if target is further than missiles min launch range
+                                else if (targetDistance >= dlz.maxLaunchRange * (PilotAI != null ? PilotAI.MissileLaunchRangeFactor(guardTarget) : 1f) || targetDistance <= dlz.minLaunchRange)  //fire the missile only if target is further than missiles min launch range
                                 {
                                     launchAuthorized = false;
                                 }
@@ -9357,7 +9397,7 @@ namespace BDArmory.Control
                     StartCoroutine(UnderAttackRoutine());
                     if (results.foundRadarMissile) //have this require an RWR?
                     {
-                        if (rwr || incomingMissileDistance <= guardRange * 0.33f) //within ID range?
+                        if (rwr || incomingMissileDistance <= IncomingMissileIdRange) //within ID range?
                         //StartCoroutine(UnderAttackRoutine());
                         {
                             FireChaff();
@@ -9478,7 +9518,7 @@ namespace BDArmory.Control
                     StartCoroutine(UnderAttackRoutine());
                     if (results.foundHeatMissile) //standin for passive acoustic homing. Will have to expand this if facing *actual* heat-seeking torpedoes
                     {
-                        if ((rwr && rwr.omniDetection) || (incomingMissileDistance <= Mathf.Min(guardRange * 0.33f, 2500))) //within ID range?
+                        if ((rwr && rwr.omniDetection) || (incomingMissileDistance <= Mathf.Min(IncomingMissileIdRange, 2500))) //within ID range?
                         {
                             if (radars.Count > 0)
                             {
@@ -10605,7 +10645,7 @@ namespace BDArmory.Control
                         VesselRadarData vrd = vessel.gameObject.GetComponent<VesselRadarData>();
                         if (vrd)
                             irstRange = vrd.MaxIRSTRange();
-                        irstRange = Mathf.Max(guardRange, irstRange);
+                        irstRange = Mathf.Max(NominalVisualRange, irstRange);
                         return Mathf.Min(maxEngageRange, irstRange);
                     }
                 case MissileBase.TargetingModes.Laser:
@@ -10625,7 +10665,7 @@ namespace BDArmory.Control
                             return 0.1f * maxEngageRange;
                     }
                 default:
-                    return Mathf.Min(maxEngageRange, guardRange);
+                    return Mathf.Min(maxEngageRange, NominalVisualRange);
             }
         }
 

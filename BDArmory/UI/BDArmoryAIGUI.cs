@@ -772,7 +772,7 @@ namespace BDArmory.UI
             stylesConfigured = true;
         }
 
-        enum Section { UpToEleven, PID, Altitude, Speed, Control, Evasion, Terrain, Ramming, Combat, Bombing, Misc, FixedAutoTuneFields, VehicleType }; // Sections and other important toggles.
+        enum Section { UpToEleven, PID, Altitude, Speed, Control, Evasion, Terrain, Ramming, Combat, Bombing, Misc, FixedAutoTuneFields, VehicleType, Tactics }; // Sections and other important toggles.
         static Dictionary<Section, bool> showSection = Enum.GetValues(typeof(Section)).Cast<Section>().ToDictionary(s => s, s => false);
         readonly Dictionary<Section, float> sectionHeights = [];
         const float contentBorder = 0.2f * entryHeight;
@@ -1026,6 +1026,9 @@ namespace BDArmory.UI
                                 showSection[Section.Evasion] = GUI.Toggle(SubsectionRect(line), showSection[Section.Evasion], StringUtils.Localize("#LOC_BDArmory_AIWindow_EvadeExtend"), showSection[Section.Evasion] ? BDArmorySetup.SelectedButtonStyle : BDArmorySetup.ButtonStyle);//"Evasion"
 
                                 line += 1.2f;
+                                showSection[Section.Tactics] = GUI.Toggle(SubsectionRect(line), showSection[Section.Tactics], "Tactics", showSection[Section.Tactics] ? BDArmorySetup.SelectedButtonStyle : BDArmorySetup.ButtonStyle);
+
+                                line += 1.2f;
                                 showSection[Section.Terrain] = GUI.Toggle(SubsectionRect(line), showSection[Section.Terrain], StringUtils.Localize("#LOC_BDArmory_AIWindow_Terrain"), showSection[Section.Terrain] ? BDArmorySetup.SelectedButtonStyle : BDArmorySetup.ButtonStyle);//"Terrain"
 
                                 line += 1.2f;
@@ -1064,7 +1067,7 @@ namespace BDArmory.UI
                                 minHeight = contentTop + (line + 1f) * entryHeight + _windowMargin;
                             }
 
-                            if (showSection[Section.PID] || showSection[Section.Altitude] || showSection[Section.Speed] || showSection[Section.Control] || showSection[Section.Bombing] || showSection[Section.Evasion] || showSection[Section.Terrain] || showSection[Section.Ramming] || showSection[Section.Misc])
+                            if (showSection[Section.PID] || showSection[Section.Altitude] || showSection[Section.Speed] || showSection[Section.Control] || showSection[Section.Bombing] || showSection[Section.Evasion] || showSection[Section.Tactics] || showSection[Section.Terrain] || showSection[Section.Ramming] || showSection[Section.Misc])
                             {
                                 scrollViewVectors[AIType.PilotAI] = GUI.BeginScrollView(new Rect(contentIndent, contentTop + entryHeight * 1.5f, ColumnWidth * 2 - contentIndent, WindowHeight - entryHeight * 1.5f - 2 * contentTop), scrollViewVectors.GetValueOrDefault(AIType.PilotAI), new Rect(0, 0, contentWidth - contentMargin * 2, height + contentTop));
 
@@ -1398,7 +1401,6 @@ namespace BDArmory.UI
                                     ctrlLines = ContentEntry(ContentType.FloatSlider, ctrlLines, contentWidth, ref AI.maxBank, nameof(AI.maxBank), "BankLimiter", $"{AI.maxBank:0}°");
                                     ctrlLines = ContentEntry(ContentType.FloatSlider, ctrlLines, contentWidth, ref AI.waypointPreRollTime, nameof(AI.waypointPreRollTime), "WaypointPreRollTime", $"{AI.waypointPreRollTime:0.00}s");
                                     ctrlLines = ContentEntry(ContentType.FloatSlider, ctrlLines, contentWidth, ref AI.waypointYawAuthorityTime, nameof(AI.waypointYawAuthorityTime), "WaypointYawAuthorityTime", $"{AI.waypointYawAuthorityTime:0.0}s");
-                                    ctrlLines = ContentEntry(ContentType.FloatSlider, ctrlLines, contentWidth, ref AI.maxAllowedGForce, nameof(AI.maxAllowedGForce), "MaxAllowedGForce", $"{AI.maxAllowedGForce:0.0}<i>g</i>");
                                     ctrlLines = ContentEntry(ContentType.FloatSlider, ctrlLines, contentWidth, ref AI.maxAllowedAoA, nameof(AI.maxAllowedAoA), "MaxAllowedAoA", $"{AI.maxAllowedAoA:0.0}°");
                                     if (!(BDArmorySettings.RUNWAY_PROJECT && BDArmorySettings.RUNWAY_PROJECT_ROUND == 55))
                                     { ctrlLines = ContentEntry(ContentType.FloatSlider, ctrlLines, contentWidth, ref AI.postStallAoA, nameof(AI.postStallAoA), "PostStallAoA", $"{AI.postStallAoA:0.0}"); }
@@ -1553,6 +1555,35 @@ namespace BDArmory.UI
                                     sectionHeights[Section.Terrain] = Mathf.Lerp(sectionHeight, gndLines, 0.15f);
                                     gndLines += 0.1f;
                                     contentHeight += gndLines * entryHeight;
+                                }
+                                if (showSection[Section.Tactics])
+                                {
+                                    float tacLines = 0.2f;
+                                    var sectionHeight = sectionHeights.GetValueOrDefault(Section.Tactics);
+                                    GUI.BeginGroup(new Rect(contentBorder, contentHeight + tacLines * entryHeight, contentWidth, sectionHeight * entryHeight), GUIContent.none, BDArmorySetup.SelectedButtonStyle);
+                                    tacLines += 0.25f;
+                                    GUI.Label(SettinglabelRect(tacLines++), "Tactics", BoldLabel);
+                                    AI.advancedTactics = GUI.Toggle(ToggleButtonRect(tacLines, contentWidth), AI.advancedTactics, "Advanced Tactics", AI.advancedTactics ? BDArmorySetup.SelectedButtonStyle : BDArmorySetup.ButtonStyle);
+                                    tacLines += 1.25f;
+                                    AI.managePartsAutomatically = GUI.Toggle(ToggleButtonRect(tacLines, contentWidth), AI.managePartsAutomatically, "Manage Flaps", AI.managePartsAutomatically ? BDArmorySetup.SelectedButtonStyle : BDArmorySetup.ButtonStyle);
+                                    tacLines += 1.25f;
+                                    GUI.Label(SettinglabelRect(tacLines++), "Skill", Label);
+                                    for (int skill = 0; skill < BDModulePilotAI.skillNames.Length; ++skill)
+                                    {
+                                        bool selected = AI.SkillLevel == skill;
+                                        if (GUI.Toggle(ToggleButtonRects(tacLines, skill, BDModulePilotAI.skillNames.Length, contentWidth), selected, BDModulePilotAI.skillNames[skill], selected ? BDArmorySetup.SelectedButtonStyle : BDArmorySetup.ButtonStyle) && !selected)
+                                            AI.SkillLevel = skill;
+                                    }
+                                    tacLines += 1.25f;
+                                    if (HighLogic.LoadedSceneIsFlight)
+                                    {
+                                        foreach (var readout in AI.TacticsReadout())
+                                            GUI.Label(SettinglabelRect(tacLines++), readout, Label);
+                                    }
+                                    GUI.EndGroup();
+                                    sectionHeights[Section.Tactics] = Mathf.Lerp(sectionHeight, tacLines, 0.15f);
+                                    tacLines += 0.1f;
+                                    contentHeight += tacLines * entryHeight;
                                 }
                                 if (showSection[Section.Ramming])
                                 {

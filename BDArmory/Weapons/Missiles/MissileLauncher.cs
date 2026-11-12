@@ -62,7 +62,7 @@ namespace BDArmory.Weapons.Missiles
         public BDDeployableRail deployableRail = null;
         public MultiMissileLauncher multiLauncher = null;
         private BDStagingAreaGauge gauge;
-        private float reloadTimer = 0;
+        public float reloadTimer = 0;
         public float heatTimer = -1;
         private Vector3 origScale = Vector3.one;
 
@@ -1466,6 +1466,7 @@ namespace BDArmory.Weapons.Missiles
 
         void OnDestroy()
         {
+            if (HasFired) RecordShotResult();
             //Debug.Log("{TorpDebug] torpedo crash tolerance: " + part.crashTolerance);
             DetachExhaustPrefabs();
             KillRCS();
@@ -1957,6 +1958,7 @@ namespace BDArmory.Weapons.Missiles
         {
             // if (gameObject is null || !gameObject.activeInHierarchy) { Debug.LogError($"[BDArmory.MissileLauncher]: Trying to fire non-existent missile {missileName} {(reloadableRail != null ? " (reloadable)" : "")} on {SourceVesselName} at {TargetVesselName}!"); return; }
             HasFired = true;
+            RecordShotLaunch();
             try // FIXME Remove this once the fix is sufficiently tested.
             {
                 GameEvents.onPartDie.Add(PartDie);
@@ -2163,6 +2165,7 @@ namespace BDArmory.Weapons.Missiles
             base.OnFixedUpdate();
 
             if (!HighLogic.LoadedSceneIsFlight) return;
+            if (HasFired) TrackShot();
 
             FloatingOriginCorrection();
 
@@ -2674,6 +2677,13 @@ namespace BDArmory.Weapons.Missiles
 
         // feature_engagementenvelope: terminal guidance mode for cruise missiles
         private void UpdateTerminalGuidance()
+        {
+            BDAStealth.HeatPatches.MissileChaffPrefix(this, out float chaffState);
+            try { UpdateTerminalGuidanceStock(); }
+            finally { BDAStealth.HeatPatches.MissileChaffFinalizer(this, chaffState); }
+        }
+
+        private void UpdateTerminalGuidanceStock()
         {
             Vector3 tempTargetPos = TargetPosition;
 
@@ -4519,7 +4529,7 @@ namespace BDArmory.Weapons.Missiles
             };
         }
 
-        void ParseModes()
+        internal void ParseModes()
         {
             homingType = homingType.ToLower();
             GuidanceMode = ParseHomingType(homingType);
@@ -4779,6 +4789,13 @@ namespace BDArmory.Weapons.Missiles
 
         // RMB info in editor
         public override string GetInfo()
+        {
+            string info = GetInfoStock();
+            BDAStealth.Patches.MissileInfoPostfix(this, ref info);
+            return info;
+        }
+
+        string GetInfoStock()
         {
             ParseModes();
 

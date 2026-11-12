@@ -16,7 +16,7 @@ using System;
 
 namespace BDArmory.Targeting
 {
-    public class ModuleTargetingCamera : BDAPartModule
+    public partial class ModuleTargetingCamera : BDAPartModule
     {
         [KSPField]
         public string cameraTransformName;
@@ -130,7 +130,7 @@ namespace BDArmory.Targeting
 
         internal static bool SlewingButtonCam;
         float finalSlewSpeed;
-        Vector2 slewInput = Vector2.zero;
+        public Vector2 slewInput = Vector2.zero;
         public static bool IsSlewing => SlewingMouseCam;
 
         private static float gap = 2;
@@ -1213,7 +1213,7 @@ namespace BDArmory.Targeting
             }
         }
 
-        void ResetCameraButton()
+        public void ResetCameraButton()
         {
             if (!resetting)
             {
@@ -1341,7 +1341,7 @@ namespace BDArmory.Targeting
             PointCameraModel(lookVector);
         }
 
-        void PointToGPSTarget()
+        public void PointToGPSTarget()
         {
             var weaponManager = WeaponManager;
             if (weaponManager && weaponManager.designatedGPSCoords != Vector3d.zero)

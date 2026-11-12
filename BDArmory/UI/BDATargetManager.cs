@@ -417,6 +417,13 @@ namespace BDArmory.UI
         /// </summary>
         public static TargetSignatureData GetFlareTarget(Ray ray, float scanRadius, float highpassThreshold, FloatCurve lockedSensorFOVBias, FloatCurve lockedSensorVelocityBias, FloatCurve lockedSensorVelocityMagnitudeBias, float lockedSensorMinAngularVelocity, TargetSignatureData heatTarget, Vector3 heatTargetAngularVelDir, float heatTargetAngularVelMag)
         {
+            TargetSignatureData result = TargetSignatureData.noTarget;
+            if (!BDAStealth.HeatPatches.FlarePrefix(ray, scanRadius, lockedSensorFOVBias, lockedSensorVelocityBias, lockedSensorVelocityMagnitudeBias, lockedSensorMinAngularVelocity, heatTarget, heatTargetAngularVelDir, heatTargetAngularVelMag, ref result)) return result;
+            return GetFlareTargetStock(ray, scanRadius, highpassThreshold, lockedSensorFOVBias, lockedSensorVelocityBias, lockedSensorVelocityMagnitudeBias, lockedSensorMinAngularVelocity, heatTarget, heatTargetAngularVelDir, heatTargetAngularVelMag);
+        }
+
+        static TargetSignatureData GetFlareTargetStock(Ray ray, float scanRadius, float highpassThreshold, FloatCurve lockedSensorFOVBias, FloatCurve lockedSensorVelocityBias, FloatCurve lockedSensorVelocityMagnitudeBias, float lockedSensorMinAngularVelocity, TargetSignatureData heatTarget, Vector3 heatTargetAngularVelDir, float heatTargetAngularVelMag)
+        {
             TargetSignatureData flareTarget = TargetSignatureData.noTarget;
             float heatSignature = heatTarget.signalStrength;
             float bestScore = 0f;
@@ -516,6 +523,18 @@ namespace BDArmory.UI
         }
 
         public static TargetSignatureData GetHeatTarget(Vessel sourceVessel, Vessel missileVessel, Ray ray, TargetSignatureData priorHeatTarget, float scanRadius, float highpassThreshold, float frontAspectHeatModifier, bool uncagedLock, bool targetCoM, FloatCurve lockedSensorFOVBias, FloatCurve lockedSensorVelocityBias, FloatCurve lockedSensorVelocityMagnitudeBias, float lockedSensorMinAngularVelocity, MissileFire mf = null, TargetInfo desiredTarget = null, bool IFF = true)
+        {
+            BDAStealth.HeatPatches.HeatPrefix(missileVessel);
+            try
+            {
+                TargetSignatureData result = GetHeatTargetStock(sourceVessel, missileVessel, ray, priorHeatTarget, scanRadius, highpassThreshold, frontAspectHeatModifier, uncagedLock, targetCoM, lockedSensorFOVBias, lockedSensorVelocityBias, lockedSensorVelocityMagnitudeBias, lockedSensorMinAngularVelocity, mf, desiredTarget, IFF);
+                BDAStealth.HeatPatches.HeatPostfix(highpassThreshold, ref result);
+                return result;
+            }
+            finally { BDAStealth.HeatPatches.HeatFinalizer(); }
+        }
+
+        static TargetSignatureData GetHeatTargetStock(Vessel sourceVessel, Vessel missileVessel, Ray ray, TargetSignatureData priorHeatTarget, float scanRadius, float highpassThreshold, float frontAspectHeatModifier, bool uncagedLock, bool targetCoM, FloatCurve lockedSensorFOVBias, FloatCurve lockedSensorVelocityBias, FloatCurve lockedSensorVelocityMagnitudeBias, float lockedSensorMinAngularVelocity, MissileFire mf, TargetInfo desiredTarget, bool IFF)
         {
             float minMass = missileVessel.InNearVacuum() ? 0f : 0.05f;  // FIXME, RAMs need min mass of 0.05, but orbital KKVs mass < 0.05
 
@@ -670,7 +689,7 @@ namespace BDArmory.UI
                 return finalData;
         }
 
-        private static float GetSeekerBias(float anglePos, Vector3 angularVel, Vector3 prevAngularVelDir, float prevAngularVelMagnitude, FloatCurve seekerBiasCurvePosition, FloatCurve seekerBiasCurveVelocity, FloatCurve lockedSensorVelocityMagnitudeBias, float lockedSensorMinAngularVelocity)
+        internal static float GetSeekerBias(float anglePos, Vector3 angularVel, Vector3 prevAngularVelDir, float prevAngularVelMagnitude, FloatCurve seekerBiasCurvePosition, FloatCurve seekerBiasCurveVelocity, FloatCurve lockedSensorVelocityMagnitudeBias, float lockedSensorMinAngularVelocity)
         {
             (float angularVelMagnitude, angularVel) = angularVel.MagNorm();
             float seekerAngularVelocity = VectorUtils.AnglePreNormalized(angularVel, prevAngularVelDir);
@@ -1551,7 +1570,7 @@ namespace BDArmory.UI
                     var tgtVisibility = mf.CanSeeTarget(target.Current, true, true);
                     if (target.Current != null && target.Current.Vessel && tgtVisibility >= MissileFire.TargetVisibility.RecentlyVisible && !target.Current.isMissile && target.Current.isThreat && target.Current.SafeOrbitalIntercept(mf))
                     {
-                        float targetScore = (target.Current == mf.currentTarget ? mf.targetBias : 1f) * (
+                        float targetScore = (target.Current == mf.currentTarget ? mf.CommittedTargetBias : 1f) * (
                             1f +
                             mf.targetWeightRange * target.Current.TargetPriRange(mf) +
                             mf.targetWeightAirPreference * target.Current.TargetPriEngagement(targetMf, mf.vessel.radarAltitude) +
@@ -1565,8 +1584,8 @@ namespace BDArmory.UI
                             mf.targetWeightThreat * target.Current.TargetPriThreat(targetMf, mf) +
                             mf.targetWeightAoD * target.Current.TargetPriAoD(mf) +
                             mf.targetWeightProtectTeammate * target.Current.TargetPriProtectTeammate(targetMf, mf) +
-                            mf.targetWeightProtectVIP * target.Current.TargetPriProtectVIP(targetMf, mf) +
-                            mf.targetWeightAttackVIP * target.Current.TargetPriAttackVIP(targetMf) +
+                            VIPTracker.ProtectWeight(mf) * target.Current.TargetPriProtectVIP(targetMf, mf) +
+                            VIPTracker.AttackWeight(mf) * target.Current.TargetPriAttackVIP(targetMf) +
                             (target.Current.Vessel.IsControllable ? 0f : mf.targetWeightUncontrolled)) *
                             (tgtVisibility == MissileFire.TargetVisibility.RecentlyVisible ? 0.5f : 1f);
                         if (BDArmorySettings.DEBUG_AI || BDArmorySettings.DEBUG_TELEMETRY) debugTargetScores.Add((target.Current.Vessel.GetName(), targetScore));

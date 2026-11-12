@@ -877,7 +877,8 @@ namespace BDArmory.UI
 
                     if (!weaponManager.guardMode && weaponManager.isHMDEnabled)
                     {
-                        Cursor.visible = false;
+                        // In IVA the cursor stays visible so cockpit switches can still be clicked with the HMD on.
+                        Cursor.visible = CameraManager.Instance != null && CameraManager.Instance.currentCameraMode == CameraManager.CameraMode.IVA;
                         return;
                     }
                 }
@@ -1524,7 +1525,8 @@ namespace BDArmory.UI
                         OnGUIWM.guardAngle = (float)field.CurrentValue;
                     }
 
-                    GUI.Label(LabelRect(++guardLines, guardLabelWidth), StringUtils.Localize("#LOC_BDArmory_WMWindow_VisualRange"), leftLabel);//"Visual Range"
+                    OnGUIWM.isVIP = GUI.Toggle(LabelRect(++guardLines, guardLabelWidth), OnGUIWM.isVIP, "VIP", OnGUIWM.isVIP ? SelectedButtonStyle : ButtonStyle);
+                    GUI.Label(LabelRect(++guardLines, guardLabelWidth), BDArmorySettings.REALISTIC_VISUAL_DETECTION ? "Max Visual Range" : StringUtils.Localize("#LOC_BDArmory_WMWindow_VisualRange"), leftLabel);//"Visual Range"
                     if (!NumFieldsEnabled)
                     {
                         OnGUIWM.guardRange = GUIUtils.HorizontalSemiLogSlider(SliderRect(guardLines, guardLabelWidth), OnGUIWM.guardRange, 100, BDArmorySettings.MAX_GUARD_VISUAL_RANGE, 1, false, false, ref cacheGuardRange);
@@ -3330,6 +3332,10 @@ namespace BDArmory.UI
                     BDArmorySettings.ALLOW_RETREAT_IF_ORBITING = GUI.Toggle(SRightRect(line), BDArmorySettings.ALLOW_RETREAT_IF_ORBITING, StringUtils.Localize("#LOC_BDArmory_Settings_RetreatIfOrbiting")); // Allow retreat if orbiting.
                     BDArmorySettings.CHECK_WATER_TERRAIN = GUI.Toggle(SLeftRect(++line), BDArmorySettings.CHECK_WATER_TERRAIN, StringUtils.Localize("#LOC_BDArmory_Settings_CheckWaterTerrain")); // Check Water
                     BDArmorySettings.WEAPONS_RESPECT_CROSSFEED = GUI.Toggle(SRightRect(line), BDArmorySettings.WEAPONS_RESPECT_CROSSFEED, StringUtils.Localize("#LOC_BDArmory_Settings_WeaponsRespectCrossfeed")); // Weapons Respect Crossfeed.
+                    BDArmorySettings.REALISTIC_VISUAL_DETECTION = GUI.Toggle(SLeftRect(++line), BDArmorySettings.REALISTIC_VISUAL_DETECTION, "Realistic Visual Detection");
+                    if (BDArmorySettings.REALISTIC_VISUAL_DETECTION)
+                        BDArmorySettings.VISUAL_BLIND_SPOTS = GUI.Toggle(SLeftRect(++line), BDArmorySettings.VISUAL_BLIND_SPOTS, "Cockpit Blind Spots");
+                    BDArmorySettings.VIP_DEATH_ENDS_ROUND = GUI.Toggle(SLeftRect(++line), BDArmorySettings.VIP_DEATH_ENDS_ROUND, "VIP Death Ends Round");
                     BDArmorySettings.RADAR_NOTCHING = GUI.Toggle(SLeftRect(++line), BDArmorySettings.RADAR_NOTCHING, StringUtils.Localize("#LOC_BDArmory_Settings_RadarNotching")); // Radar Notching Toggle
                     if (BDArmorySettings.RADAR_NOTCHING)
                     {

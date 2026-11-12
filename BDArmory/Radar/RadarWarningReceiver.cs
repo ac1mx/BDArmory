@@ -17,7 +17,7 @@ using System;
 
 namespace BDArmory.Radar
 {
-    public class RadarWarningReceiver : BDAPartModule
+    public partial class RadarWarningReceiver : BDAPartModule
     {
         public delegate void RadarPing(Vessel v, Vector3 source, RWRThreatTypes type, float persistTime, Vessel vSource);
 
@@ -116,7 +116,7 @@ namespace BDArmory.Radar
         //public Vector3[] pingWorldPositions;
         //List<TargetSignatureData> launchWarnings;
 
-        private RWRSignatureData[] launchWarnings;
+        public RWRSignatureData[] launchWarnings;
         private int _launchWarningsHead = 0;
         private int _launchWarningsSize = 0;
 
@@ -297,7 +297,7 @@ namespace BDArmory.Radar
 
             float currRange = RWRMWSRange;
 
-            if (BDArmorySettings.VARIABLE_MISSILE_VISIBILITY) // assume same detectability logic as visual detection, does mean the MWS is implied to be IR based
+            if (BDArmorySettings.VARIABLE_MISSILE_VISIBILITY || BDArmorySettings.REALISTIC_VISUAL_DETECTION) // assume same detectability logic as visual detection, does mean the MWS is implied to be IR based
             {
                 currRange *= (currMissile.MissileState == MissileBase.MissileStates.Boost ? 1 : (currMissile.MissileState == MissileBase.MissileStates.Cruise ? 0.75f : 0.33f));
             }
@@ -642,6 +642,7 @@ namespace BDArmory.Radar
                             break;
                         audioSource.clip = missileLaunchSound;
                         audioSource.Play();
+                        playLaunch = true;
                         break;
 
                     case RWRThreatTypes.Sonar:
@@ -669,6 +670,7 @@ namespace BDArmory.Radar
                             break;
                         audioSource.clip = (missileLockSound);
                         audioSource.Play();
+                        playLock = true;
                         audioSourceRepeatDelay = audioSourceRepeatDelayTime;    //set a min repeat delay to prevent too much audi pinging
                         break;
                     case RWRThreatTypes.None:
@@ -678,6 +680,7 @@ namespace BDArmory.Radar
                         {
                             audioSource.clip = (radarPingSound);
                             audioSource.Play();
+                            playPing = true;
                             audioSourceRepeatDelay = audioSourceRepeatDelayTime;    //set a min repeat delay to prevent too much audi pinging
                         }
                         break;
@@ -689,8 +692,6 @@ namespace BDArmory.Radar
         {
             if (!HighLogic.LoadedSceneIsFlight || !FlightGlobals.ready || !BDArmorySetup.GAME_UI_ENABLED ||
                 !vessel.isActiveVessel || !displayRWR) return;
-            if (audioSourceRepeatDelay > 0)
-                audioSourceRepeatDelay -= Time.fixedDeltaTime;
 
             if (resizingWindow && Event.current.type == EventType.MouseUp) { resizingWindow = false; }
 

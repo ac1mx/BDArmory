@@ -61,7 +61,7 @@ namespace BDArmory.Weapons.Missiles
         [KSPField] public bool displayOrdinanceHasColliders = true; //should missile dummies have colliders? (offers somewhat of a performance boost if disabled)
         [KSPField] public bool permitJettison = false; //allow jettisoning of missiles for multimissile launchrails and similar
         [KSPField] public bool ignoreLauncherColliders = false; //temporarily disable missile colliders to let them clear the launcher, for large-scale VLS or similar. -WARNING- has some effect on missile flight
-        AnimationState deployState;
+        public AnimationState deployState;
         public ModuleMissileRearm missileSpawner = null;
         MissileLauncher missileLauncher = null;
         [KSPField] public bool adjustMissileVOffset = false; //should missile vertical offset dynamically adjust based on missile diameter (for MMLs on adjustable rails, etc)

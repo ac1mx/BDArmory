@@ -24,7 +24,7 @@ using static BDArmory.Bullets.PooledBullet;
 
 namespace BDArmory.Weapons
 {
-    public class ModuleWeapon : EngageableWeapon, IBDWeapon
+    public partial class ModuleWeapon : EngageableWeapon, IBDWeapon
     {
         #region Declarations
 
@@ -1295,6 +1295,8 @@ namespace BDArmory.Weapons
                 }
             }
             else baseRPM = 3000;
+            SetupRateOfFireMode();
+            SetupHeatAnimation();
 
             if (roundsPerMinute >= 1500 || (eWeaponType == WeaponTypes.Laser && !pulseLaser))
             {
@@ -2373,7 +2375,8 @@ namespace BDArmory.Weapons
                 }
 
                 Texture2D texture;
-                if (VectorUtils.Angle(pointingAtPosition - transform.position, finalAimTarget - transform.position) < 1f)
+                solutionFound = VectorUtils.Angle(pointingAtPosition - transform.position, finalAimTarget - transform.position) < 1f;
+                if (solutionFound)
                 {
                     texture = BDArmorySetup.Instance.greenSpikedPointCircleTexture;
                 }
@@ -5226,7 +5229,7 @@ namespace BDArmory.Weapons
                 //tgtRocket = null;
                 if (SpoolUpTime > 0)
                 {
-                    roundsPerMinute = baseRPM / 10;
+                    roundsPerMinute = ActiveMaxRPM / 10;
                     spooltime = 0;
                 }
                 if (eWeaponType == WeaponTypes.Laser && LaserGrowTime > 0)
@@ -5352,7 +5355,7 @@ namespace BDArmory.Weapons
                         {
                             spooltime += TimeWarp.deltaTime / SpoolUpTime;
                             spooltime = Mathf.Clamp01(spooltime);
-                            roundsPerMinute = Mathf.Lerp((baseRPM / 10), baseRPM, spooltime);
+                            roundsPerMinute = Mathf.Lerp((ActiveMaxRPM / 10), ActiveMaxRPM, spooltime);
                         }
                     }
                     if (!useRippleFire || isRippleFiring || WeaponManager.GetRippleIndex(WeaponName) == rippleIndex) // Don't fire rippling weapons when they're on the wrong part of the cycle (initially; afterwards, let their timers decide). Spool up and grow lasers though.
@@ -5435,7 +5438,7 @@ namespace BDArmory.Weapons
                     {
                         spooltime -= TimeWarp.deltaTime / SpoolUpTime;
                         spooltime = Mathf.Clamp01(spooltime);
-                        roundsPerMinute = Mathf.Lerp(baseRPM, (baseRPM / 10), spooltime);
+                        roundsPerMinute = Mathf.Lerp(ActiveMaxRPM, (ActiveMaxRPM / 10), spooltime);
                     }
                 }
                 if (hasCharged)
@@ -5699,6 +5702,7 @@ namespace BDArmory.Weapons
         }
         void UpdateHeat()
         {
+            UpdateHeatAnimation();
             if (heat > maxHeat && !isOverheated)
             {
                 isOverheated = true;
@@ -5852,7 +5856,7 @@ namespace BDArmory.Weapons
             {
                 if (visualTargetVessel)
                 {
-                    targetInVisualRange = (visualTargetVessel.transform.position - transform.position).sqrMagnitude < weaponManager.guardRange * weaponManager.guardRange;
+                    targetInVisualRange = (visualTargetVessel.transform.position - transform.position).sqrMagnitude < weaponManager.VisualRangeTo(visualTargetVessel) * weaponManager.VisualRangeTo(visualTargetVessel);
                 }
                 if (weaponManager.vesselRadarData && weaponManager.vesselRadarData.locked) // && weaponManager.slavedPosition != Vector3.zero)
                 {

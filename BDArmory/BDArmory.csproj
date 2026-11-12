@@ -154,10 +154,16 @@
     <Compile Include="Control\BDGenericAIBase.cs" />
     <Compile Include="Control\BDModuleOrbitalAI.cs" />
     <Compile Include="Control\BDModulePilotAI.cs" />
+    <Compile Include="Control\PilotControlCore.cs" />
+    <Compile Include="Control\PilotTactics.cs" />
+    <Compile Include="Control\VIPTracker.cs" />
+    <Compile Include="Control\ShotModel.cs" />
+    <Compile Include="Stealth\*.cs" />
     <Compile Include="Control\BDModuleSurfaceAI.cs" />
     <Compile Include="Control\BDModuleVTOLAI.cs" />
     <Compile Include="Control\IBDAIControl.cs" />
     <Compile Include="Control\MissileFire.cs" />
+    <Compile Include="Control\MissileFire.Cockpit.cs" />
     <Compile Include="Control\ModuleWingCommander.cs" />
     <Compile Include="CounterMeasure\CMBubble.cs" />
     <Compile Include="CounterMeasure\CMChaff.cs" />
@@ -250,12 +256,16 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Radar\ModuleIRST.cs" />
     <Compile Include="Radar\ModuleRadar.cs" />
+    <Compile Include="Radar\ModuleRadar.Cockpit.cs" />
     <Compile Include="Radar\ModuleSpaceRadar.cs" />
     <Compile Include="Radar\RadarDisplayData.cs" />
     <Compile Include="Radar\RadarUtils.cs" />
     <Compile Include="Radar\RadarWarningReceiver.cs" />
+    <Compile Include="Radar\RadarWarningReceiver.Cockpit.cs" />
     <Compile Include="Radar\VesselRadarData.cs" />
+    <Compile Include="Radar\VesselRadarData.Cockpit.cs" />
     <Compile Include="Radar\ViewScanResults.cs" />
+    <Compile Include="Radar\VisualDetection.cs" />
     <Compile Include="Services\IEngageService.cs" />
     <Compile Include="Services\INotificableService.cs" />
     <Compile Include="Services\NotificableService.cs" />
@@ -270,6 +280,7 @@
     <Compile Include="Shaders\BDAShaderLoader.cs" />
     <Compile Include="Targeting\GPSTargetInfo.cs" />
     <Compile Include="Targeting\ModuleTargetingCamera.cs" />
+    <Compile Include="Targeting\ModuleTargetingCamera.Cockpit.cs" />
     <Compile Include="Targeting\TGPCamRotator.cs" />
     <Compile Include="Targeting\TGPCameraEffects.cs" />
     <Compile Include="Targeting\TargetInfo.cs" />
@@ -372,6 +383,7 @@
     <Compile Include="Weapons\ModuleAmmoMagazine.cs" />
     <Compile Include="Weapons\ModuleEMP.cs" />
     <Compile Include="Weapons\ModuleWeapon.cs" />
+    <Compile Include="Weapons\ModuleWeapon.Cockpit.cs" />
     <Compile Include="Weapons\RippleOption.cs" />
   </ItemGroup>
   <ItemGroup>

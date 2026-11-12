@@ -14,12 +14,12 @@ using BDArmory.Weapons.Missiles;
 
 namespace BDArmory.Radar
 {
-    public class VesselRadarData : MonoBehaviour
+    public partial class VesselRadarData : MonoBehaviour
     {
         private List<ModuleRadar> availableRadars;
         private List<ModuleIRST> availableIRSTs;
         private List<ModuleRadar> externalRadars;
-        private List<VesselRadarData> externalVRDs;
+        public List<VesselRadarData> externalVRDs;
         private float _maxRadarRange = 0;
         internal bool resizingWindow = false;
 
@@ -123,7 +123,7 @@ namespace BDArmory.Radar
         private Vector2 selectorPos = Vector2.zero;
 
         //data link
-        private List<VesselRadarData> availableExternalVRDs;
+        public List<VesselRadarData> availableExternalVRDs;
 
         private Transform referenceTransform;
 
@@ -138,11 +138,11 @@ namespace BDArmory.Radar
         //bool boresightScan = false;
 
         //TargetSignatureData[] contacts = new TargetSignatureData[30];
-        private List<RadarDisplayData> displayedTargets;
-        private List<IRSTDisplayData> displayedIRTargets;
+        public List<RadarDisplayData> displayedTargets;
+        public List<IRSTDisplayData> displayedIRTargets;
         public bool locked;
-        private int activeLockedTargetIndex;
-        private List<int> lockedTargetIndexes;
+        public int activeLockedTargetIndex;
+        public List<int> lockedTargetIndexes;
 
         public int numLockedTargets
         {
@@ -793,6 +793,8 @@ namespace BDArmory.Radar
                        vessel.isActiveVessel && BDArmorySetup.GAME_UI_ENABLED && !MapView.MapIsEnabled);
             if (drawGUI)
                 UpdateGUIData();
+            else
+                RefreshDisplayWithoutGUI();
         }
 
         void FixedUpdate()
@@ -870,7 +872,7 @@ namespace BDArmory.Radar
             UpdateRWRRange();
         }
 
-        private void IncreaseRange()
+        public void IncreaseRange()
         {
             int origIndex = rangeIndex;
             rangeIndex = Mathf.Clamp(rangeIndex + 1, 0, rIncrements.Length - 1);
@@ -879,7 +881,7 @@ namespace BDArmory.Radar
             UpdateRWRRange();
         }
 
-        private void DecreaseRange()
+        public void DecreaseRange()
         {
             int origIndex = rangeIndex;
             rangeIndex = Mathf.Clamp(rangeIndex - 1, 0, rIncrements.Length - 1);
@@ -1424,7 +1426,7 @@ namespace BDArmory.Radar
 
             dispRange = availableRadars.Count > 0;
 
-            int totCount = rCount + iCount - externalRadars.Count;
+            int totCount = rCount + iCount; // Upper bound. Subtracting the linked radars undercounts when a linked radar has since been switched off or unlinked, and the loops below then run off the arrays.
 
             // If our radarData arrays are smaller than the total count of on-board sensors
             // then we re-size the arrays.
@@ -1834,7 +1836,7 @@ namespace BDArmory.Radar
         {
             displayedIRTargets.RemoveAll(t => t.detectedByIRST == irst);
         }
-        private void UnlinkVRD(VesselRadarData vrd)
+        public void UnlinkVRD(VesselRadarData vrd)
         {
             if (BDArmorySettings.DEBUG_RADAR) Debug.Log("[BDArmory.VesselRadarData]: Unlinking VRD: " + vrd.vessel.vesselName);
             externalVRDs.Remove(vrd);
@@ -2033,7 +2035,7 @@ namespace BDArmory.Radar
             linkWindowOpen = false;
         }
 
-        private void RefreshAvailableLinks()
+        public void RefreshAvailableLinks()
         {
             if (!HighLogic.LoadedSceneIsFlight || vessel == null || weaponManager == null || FlightGlobals.fetch == null || FlightGlobals.Vessels == null || !FlightGlobals.ready)
             {
@@ -2500,14 +2502,25 @@ namespace BDArmory.Radar
         }
 
         private bool pingPositionsDirty = true;
-        MissileLaunchParams guiDLZData;
-        private bool guiDrawDLZData;
+        public MissileLaunchParams guiDLZData;
+        public bool guiDrawDLZData;
         float guiDistToTarget;
         // Size of 4 * jammedPositionsSize (because we display 4 jammed positions)
-        Vector2[] jammedPositions;
+        internal Vector2[] jammedPositions;
         int jammedPositionsSize;
 
         private void UpdateDisplayedContacts()
+        {
+            BDAStealth.JamPatches.DisplayPrefix(this);
+            try
+            {
+                UpdateDisplayedContactsStock();
+                BDAStealth.JamPatches.DisplayPostfix(this);
+            }
+            finally { BDAStealth.JamPatches.DisplayFinalizer(); }
+        }
+
+        private void UpdateDisplayedContactsStock()
         {
             Vector2 displayCenter = guiDispOmni ? new Vector2(RadarDisplayRect.x * 0.5f, RadarDisplayRect.y * 0.5f) : new Vector2(RadarDisplayRect.x * 0.5f, RadarDisplayRect.y);
             int currJammedIndex = 0;
@@ -2741,7 +2754,7 @@ namespace BDArmory.Radar
 
                         if (i == lTarInd && guiDrawDLZData)
                         {
-                            float rangeToPixels = (1 / rIncrements[rangeIndex]) * RadarDisplayRect.height;
+                            rangeToPixels = (1 / rIncrements[rangeIndex]) * RadarDisplayRect.height;
                             float dlzWidth = 12;
                             float lineWidth = 2;
                             float dlzX = RadarDisplayRect.width - dlzWidth - lineWidth;
@@ -2772,7 +2785,6 @@ namespace BDArmory.Radar
                             GUIUtils.DrawRectangle(noEscapeLineRect, Color.green);
 
                             float targetDistIconSize = 16 * BDArmorySettings.RADAR_WINDOW_SCALE;
-                            float targetDistY;
                             if (!omniDisplay)
                             {
                                 targetDistY = pingPosition.y - (targetDistIconSize / 2);
@@ -3063,7 +3075,7 @@ namespace BDArmory.Radar
             }
         }
 
-        private bool omniDisplay
+        public bool omniDisplay
         {
             get { return (radarCount > 1 || (radarCount == 1 && availableRadars[0].omnidirectional) || irstCount > 1 || (irstCount == 1 && !availableIRSTs[0].irstRanging)); }
         }

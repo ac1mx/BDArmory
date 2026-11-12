@@ -49,7 +49,6 @@ namespace BDArmory.Evolution
             "maxSteerAtMaxSpeed",
             "cornerSpeed",
             "maxBank",
-            "maxAllowedGForce",
             "maxAllowedAoA",
             "minEvasionTime",
             "evasionThreshold",
