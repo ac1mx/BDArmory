@@ -404,6 +404,12 @@ namespace BDAStealth
         {
             for (int i = 0; i < renderParts.Count; i++) if (renderParts[i] != null) renderParts[i].radarReflectivity = renderRefl[i];
             renderParts.Clear(); renderRefl.Clear();
+            RecordRender(v, ti);
+        }
+
+        /// <summary>Remember a finished render's signature for the damage model (called later for a GPU read-back).</summary>
+        internal static void RecordRender(Vessel v, TargetInfo ti)
+        {
             if (RenderStock || ti == null || v == null || !HighLogic.LoadedSceneIsFlight || !skins.TryGetValue(v, out Skin s) || s.Parts.Count == 0) return;
             s.RenderedRcs = ti.radarBaseSignature;
             Vector3 size = v.vesselSize;

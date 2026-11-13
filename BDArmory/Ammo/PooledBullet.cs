@@ -25,6 +25,7 @@ namespace BDArmory.Bullets
         public static PooledBulletManager Instance;
         readonly HashSet<PooledBullet> activeBullets = [];
 
+        public static HashSet<PooledBullet> ActiveBullets => Instance != null ? Instance.activeBullets : null;
         public static void AddBullet(PooledBullet bullet) { Instance.activeBullets.Add(bullet); }
         public static void RemoveBullet(PooledBullet bullet) { Instance.activeBullets.Remove(bullet); }
 
@@ -153,8 +154,16 @@ namespace BDArmory.Bullets
         public float detonationRange = 5f;
         public float timeToDetonation;
         float armingTime;
-        float randomWidthScale = 1;
+        internal float randomWidthScale = 1;
         LineRenderer[] bulletTrail;
+        // With GPU.TracerRenderer active, it draws the tracer and smoke trail from these, and the LineRenderers don't render.
+        internal bool gpuTracer;
+        internal Texture tracerTexture, smokeTexture;
+        internal Color TracerTint, SmokeTint; // _TintColor * _Lum * 2 of the LineRenderer materials
+        internal float SmokeTextureOffset;
+        internal Vector3[] LinePositions => linePositions;
+        internal Vector3[] SmokePositions => smokePositions;
+        internal bool SmokeTrailVisible => bulletTrail[1].enabled;
         public float timeAlive = 0;
         public float timeToLiveUntil;
         Light lightFlash;
@@ -344,12 +353,21 @@ namespace BDArmory.Bullets
             smokeColor.g = 0.85f;
             smokeColor.b = 0.85f;
             smokeColor.a = 0.75f;
-            bulletTrail[0].material.mainTexture = GameDatabase.Instance.GetTexture(bulletTexturePath, false);
+            gpuTracer = GPU.TracerRenderer.Active;
+            bulletTrail[0].forceRenderingOff = gpuTracer;
+            bulletTrail[1].forceRenderingOff = gpuTracer;
+            tracerTexture = GameDatabase.Instance.GetTexture(bulletTexturePath, false);
+            smokeTexture = null;
+            SmokeTextureOffset = 0f;
+            TracerTint = currentColor * (tracerLuminance > 0 ? tracerLuminance : 0.5f) * 2f;
+            SmokeTint = smokeColor * 0.5f * 2f;
+            bulletTrail[0].material.mainTexture = tracerTexture;
             bulletTrail[0].material.SetColor("_TintColor", currentColor);
             bulletTrail[0].material.SetFloat("_Lum", tracerLuminance > 0 ? tracerLuminance : 0.5f);
             if (!string.IsNullOrEmpty(smokeTexturePath))
             {
-                bulletTrail[1].material.mainTexture = GameDatabase.Instance.GetTexture(smokeTexturePath, false);
+                smokeTexture = GameDatabase.Instance.GetTexture(smokeTexturePath, false);
+                bulletTrail[1].material.mainTexture = smokeTexture;
                 bulletTrail[1].material.SetColor("_TintColor", smokeColor);
                 bulletTrail[1].material.SetFloat("_Lum", 0.5f);
                 bulletTrail[1].textureMode = LineTextureMode.Tile;
@@ -441,14 +459,24 @@ namespace BDArmory.Bullets
             if (fadeColor)
             {
                 FadeColor();
-                bulletTrail[0].material.SetColor("_TintColor", currentColor * (tracerLuminance > 0 ? tracerLuminance : 0.5f));
+                float lum = tracerLuminance > 0 ? tracerLuminance : 0.5f;
+                if (gpuTracer) TracerTint = currentColor * lum * lum * 2f; // _TintColor = colour * lum, then times _Lum in the shader.
+                else bulletTrail[0].material.SetColor("_TintColor", currentColor * lum);
             }
             if (tracerLuminance > 1 && bulletTrail[1].enabled)
             {
                 float fade = Mathf.Lerp(0.75f, 0.05f, 0.07f);
                 smokeColor.a = fade;
-                bulletTrail[1].material.SetColor("_TintColor", smokeColor);
-                bulletTrail[1].material.SetTextureOffset("_MainTex", new Vector2(-timeAlive / 3, 0));
+                if (gpuTracer)
+                {
+                    SmokeTint = smokeColor * 0.5f * 2f;
+                    SmokeTextureOffset = -timeAlive / 3;
+                }
+                else
+                {
+                    bulletTrail[1].material.SetColor("_TintColor", smokeColor);
+                    bulletTrail[1].material.SetTextureOffset("_MainTex", new Vector2(-timeAlive / 3, 0));
+                }
                 if (fade <= 0.05f) bulletTrail[1].enabled = false;
             }
             SetTracerPosition();
@@ -2402,6 +2430,7 @@ namespace BDArmory.Bullets
                 for (int i = 0; i < smokePositions.Length; ++i) smokePositions[i] -= offset;
             }
             //if (Vector3.Distance(startPosition, currPosition) > 1000) smokePositions[0] = currPosition - ((currentVelocity - FlightGlobals.ActiveVessel.Velocity()).normalized * 1000);
+            if (gpuTracer) return; // GPU.TracerRenderer reads the positions.
             bulletTrail[0].SetPositions(linePositions);
             if (bulletTrail[1].enabled) bulletTrail[1].SetPositions(smokePositions);
         }

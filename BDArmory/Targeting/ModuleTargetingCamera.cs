@@ -118,6 +118,9 @@ namespace BDArmory.Targeting
         [KSPField(isPersistant = true)]
         public bool nvMode;
 
+        [KSPField(isPersistant = true)]
+        public bool thermalMode;
+
         //GUI
         public static int camIndex = 0;
         public static ModuleTargetingCamera activeCam;
@@ -211,6 +214,7 @@ namespace BDArmory.Targeting
                 TargetingCamera.Instance.EnableCamera(cameraParentTransform);
                 TargetingCamera.Instance.color = colorCamera;
                 TargetingCamera.Instance.nvMode = nvMode;
+                TargetingCamera.Instance.thermalMode = thermalMode;
                 TargetingCamera.Instance.SetFOV(fov);
                 ResizeTargetWindow();
             }
@@ -656,6 +660,12 @@ namespace BDArmory.Targeting
         {
             nvMode = !nvMode;
             TargetingCamera.Instance.nvMode = nvMode;
+        }
+
+        void ToggleThermal()
+        {
+            thermalMode = !thermalMode;
+            TargetingCamera.Instance.thermalMode = thermalMode;
         }
 
         void SetActiveCam(bool nextCam)
@@ -1191,12 +1201,18 @@ namespace BDArmory.Targeting
 
             //nv button
             float nvStartX = startX;
-            Rect nvRect = new Rect(nvStartX, controlsStartY + ++line * lineHeight, buttonWidth, buttonHeight);
-            string nvLabel = nvMode ? "NV Off" : "NV On";
+            bool thermalAvailable = GPU.ThermalView.Available;
+            float nvWidth = thermalAvailable ? (buttonWidth - 2) / 2 : buttonWidth;
+            Rect nvRect = new Rect(nvStartX, controlsStartY + ++line * lineHeight, nvWidth, buttonHeight);
+            string nvLabel = thermalAvailable ? "NV" : (nvMode ? "NV Off" : "NV On");
             GUIStyle nvStyle = nvMode ? BDArmorySetup.SelectedButtonStyle : buttonStyle;
             if (GUI.Button(nvRect, nvLabel, nvStyle))
             {
                 ToggleNV();
+            }
+            if (thermalAvailable && GUI.Button(new Rect(nvStartX + nvWidth + 2, nvRect.y, nvWidth, buttonHeight), "TI", thermalMode ? BDArmorySetup.SelectedButtonStyle : buttonStyle))
+            {
+                ToggleThermal();
             }
 
             if (BDArmorySettings.DEBUG_RADAR) // Debug what the various cameras show in the targeting window.

@@ -165,6 +165,7 @@
     <Compile Include="Control\PilotSection.cs" />
     <Compile Include="Control\PilotMatchup.cs" />
     <Compile Include="Stealth\*.cs" />
+    <Compile Include="GPU\*.cs" />
     <Compile Include="Control\BDModuleSurfaceAI.cs" />
     <Compile Include="Control\BDModuleVTOLAI.cs" />
     <Compile Include="Control\IBDAIControl.cs" />

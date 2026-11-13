@@ -14,6 +14,7 @@ namespace BDArmory.Targeting
         TGPCameraEffects camEffects;
         Light nvLight;
         public bool nvMode = false;
+        public bool thermalMode = false; // White-hot thermal image (GPU.ThermalView)
         public bool color = false;
 
         private Texture2D reticleTex;
@@ -144,8 +145,20 @@ namespace BDArmory.Targeting
             ReadyForUse = true;
         }
 
+        /// <summary>Main-thread time of the last targeting camera frame (diagnostics).</summary>
+        public static double LastRenderMs { get; private set; }
+        static readonly System.Diagnostics.Stopwatch renderWatch = new System.Diagnostics.Stopwatch();
+
         void RenderCameras()
         {
+            renderWatch.Restart();
+            try { RenderCamerasNow(); }
+            finally { LastRenderMs = renderWatch.Elapsed.TotalMilliseconds; }
+        }
+
+        void RenderCamerasNow()
+        {
+            if (thermalMode && GPU.ThermalView.Render(cameras, CamEnabled, targetCamRenderTexture)) return;
             if (cameras[3] != null && CamEnabled[3]) cameras[3].Render(); // Galaxy cam
             if (cameras[2] != null && CamEnabled[2]) cameras[2].Render(); // Sky cam
 

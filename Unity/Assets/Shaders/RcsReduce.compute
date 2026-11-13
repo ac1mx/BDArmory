@@ -1,0 +1,55 @@
+// Radar return of one rendered RCS aspect: the sum over its pixels of the brightest colour component, in 8-bit units.
+// One dispatch per aspect adds that aspect's sum into _Sums[_Slot]; the sums are read back once per signature render.
+#pragma kernel Reduce
+#pragma kernel ReduceSlices
+
+Texture2D<float4> _Source;
+RWStructuredBuffer<uint> _Sums;
+uint _Slot;
+uint _Size;
+
+groupshared uint partialSums[256];
+
+[numthreads(16, 16, 1)]
+void Reduce(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    uint value = 0;
+    if (id.x < _Size && id.y < _Size)
+    {
+        // The render target is 8 bits per channel: the brightest channel times 255 is that channel's byte exactly.
+        float4 c = _Source.Load(int3(id.xy, 0));
+        value = (uint)round(saturate(max(c.r, max(c.g, c.b))) * 255.0);
+    }
+    partialSums[gi] = value;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = 128; stride > 0; stride >>= 1)
+    {
+        if (gi < stride) partialSums[gi] += partialSums[gi + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (gi == 0) InterlockedAdd(_Sums[_Slot], partialSums[0]);
+}
+
+// All aspects at once from a texture array (slice i = aspect i): _Sums[slice] += the slice's sum.
+Texture2DArray<float4> _SourceArray;
+
+[numthreads(16, 16, 1)]
+void ReduceSlices(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    uint value = 0;
+    if (id.x < _Size && id.y < _Size)
+    {
+        float4 c = _SourceArray.Load(int4(id.xy, id.z, 0));
+        value = (uint)round(saturate(max(c.r, max(c.g, c.b))) * 255.0);
+    }
+    partialSums[gi] = value;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = 128; stride > 0; stride >>= 1)
+    {
+        if (gi < stride) partialSums[gi] += partialSums[gi + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (gi == 0) InterlockedAdd(_Sums[id.z], partialSums[0]);
+}

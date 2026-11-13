@@ -44,11 +44,14 @@ namespace BDArmory.Radar
         private static int rcsAtlasAspects;
         // Materials of the vessel being rendered, switched to the RCS shader once per render (not once per aspect).
         private static readonly List<Material> rcsMaterials = new List<Material>();
+        // Camera matrices and light direction of every aspect, for drawing them all at once (GPU.RcsInstancedRender).
+        private static Matrix4x4[] instancedVP = new Matrix4x4[0];
+        private static Vector4[] instancedLight = new Vector4[0];
         private static bool rcsMaterialsPrepared;
         private static readonly Dictionary<Shader, bool> rcsShaderExcluded = new Dictionary<Shader, bool>();
         private static readonly int lightDirID = Shader.PropertyToID("_LIGHTDIR"), rcsColorID = Shader.PropertyToID("_RCSCOLOR");
         // With GameData/BDArmory/PluginData/rcs_check.on present, every aspect is also rendered and read back the old way and the largest difference is logged.
-        private static readonly bool rcsCheckEnabled = System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/rcs_check.on"));
+        public static bool rcsCheckEnabled = System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/rcs_check.on"));
         private static Texture2D drawTexture1;
         public static Texture2D GetTexture1 { get { return drawTexture1; } }
         private static Texture2D drawTexture2;
@@ -281,15 +284,16 @@ namespace BDArmory.Radar
         /// </summary>
         public static void UpdateRadarCrossSectionNow(Vessel vessel)
         {
-            if (vessel != null) GetVesselRadarCrossSection(vessel, true);
+            if (vessel != null) GetVesselRadarCrossSection(vessel, true, allowDeferredRead: true);
         }
 
-        public static void ForceUpdateRadarCrossSections(List<Vessel> vessels = null)
+        /// <param name="allowDeferredRead">In flight, the new signatures may arrive a few frames later (GPU read-back); pass false to have them set on return.</param>
+        public static void ForceUpdateRadarCrossSections(List<Vessel> vessels = null, bool allowDeferredRead = true)
         {
             foreach (var vessel in (vessels == null ? BDATargetManager.LoadedVessels : vessels))
             {
                 if (vessel == null) continue;
-                GetVesselRadarCrossSection(vessel, true);
+                GetVesselRadarCrossSection(vessel, true, allowDeferredRead: allowDeferredRead);
             }
         }
 
@@ -461,7 +465,7 @@ namespace BDArmory.Radar
         /// <summary>
         /// Internal method: get a vessel base radar signature
         /// </summary>
-        private static TargetInfo GetVesselRadarCrossSection(Vessel v, bool force = false, bool updateJammers = true)
+        private static TargetInfo GetVesselRadarCrossSection(Vessel v, bool force = false, bool updateJammers = true, bool allowDeferredRead = false)
         {
             //read vesseltargetinfo, or render against radar cameras
             TargetInfo ti = v.gameObject.GetComponent<TargetInfo>();
@@ -539,6 +543,7 @@ namespace BDArmory.Radar
                 }
                 if (BDArmorySettings.DEBUG_RADAR) Debug.Log($"[BDArmory.RadarUtils] Performing RCS Rendering! Vessel: {(v ? v.vesselName : "null")}, with mass: {ti.radarMassAtUpdate}, force: {force}, ti.radarBaseSignature: {ti.radarBaseSignature}, radarBaseSignatureNeedsUpdate: {ti.radarBaseSignatureNeedsUpdate} and radarSignatureMatrixNeedsUpdate: {ti.radarSignatureMatrixNeedsUpdate}.");
 
+                bool deferred = false;
                 // is it just some debris? then dont bother doing a real rcs rendering and just fake it with the parts mass
                 if (VesselModuleRegistry.IgnoredVesselTypes.Contains(v.vesselType) || !v.IsControllable)
                 {
@@ -549,7 +554,11 @@ namespace BDArmory.Radar
                     // perform radar rendering to obtain base cross section
                     try
                     {
-                        ti = RenderVesselRadarSnapshot(v, v.transform, ti);
+                        // With a deferred read the signature arrives later, and the jammers are updated then.
+                        Action<TargetInfo> onSignature = null;
+                        if (allowDeferredRead && updateJammers)
+                            onSignature = renderedTi => { if (renderedTi != null && renderedTi.Vessel != null) renderedTi.Vessel.gameObject.GetComponent<VesselECMJInfo>()?.UpdateJammerStrength(renderedTi); };
+                        ti = RenderVesselRadarSnapshot(v, v.transform, ti, false, allowDeferredRead, onSignature, out deferred);
                     }
                     catch (Exception e) // Unity physics sometimes breaks (MMGs sometimes cause this).
                     {
@@ -565,8 +574,8 @@ namespace BDArmory.Radar
 
                 if (updateJammers)
                 {
-                    // Update ECM impact on RCS if base RCS is modified
-                    VesselECMJInfo jammer = v.gameObject.GetComponent<VesselECMJInfo>();
+                    // Update ECM impact on RCS if base RCS is modified (when the signature arrives, for a deferred read)
+                    VesselECMJInfo jammer = deferred ? null : v.gameObject.GetComponent<VesselECMJInfo>();
                     if (jammer != null)
                     {
                         jammer.UpdateJammerStrength(ti);
@@ -643,14 +652,25 @@ namespace BDArmory.Radar
         /// <param name="inEditorZoom">when true, we try to make the rendered vessel fill the rendertexture completely, for a better detailed view. This does skew the computed cross section, so it is only for a good visual in editor!</param>
         public static TargetInfo RenderVesselRadarSnapshot(Vessel v, Transform t, TargetInfo ti = null, bool inEditorZoom = false)
         {
-            BDAStealth.Patches.RenderPrefix(v);
-            TargetInfo result = null;
-            try { return result = RenderVesselRadarSnapshotStock(v, t, ti, inEditorZoom); }
-            finally { BDAStealth.Patches.RenderFinalizer(v, result); }
+            return RenderVesselRadarSnapshot(v, t, ti, inEditorZoom, false, null, out _);
         }
 
-        static TargetInfo RenderVesselRadarSnapshotStock(Vessel v, Transform t, TargetInfo ti, bool inEditorZoom)
+        /// <summary>
+        /// With allowDeferredRead in flight, the aspects may be summed on the GPU and read back asynchronously: deferred is then true,
+        /// ti keeps its previous signature until the read-back arrives a few frames later, and onSignature runs at that point.
+        /// </summary>
+        static TargetInfo RenderVesselRadarSnapshot(Vessel v, Transform t, TargetInfo ti, bool inEditorZoom, bool allowDeferredRead, Action<TargetInfo> onSignature, out bool deferred)
         {
+            BDAStealth.Patches.RenderPrefix(v);
+            TargetInfo result = null;
+            deferred = false;
+            try { return result = RenderVesselRadarSnapshotStock(v, t, ti, inEditorZoom, allowDeferredRead, onSignature, out deferred); }
+            finally { BDAStealth.Patches.RenderFinalizer(v, deferred ? null : result); } // A deferred render is recorded when it arrives.
+        }
+
+        static TargetInfo RenderVesselRadarSnapshotStock(Vessel v, Transform t, TargetInfo ti, bool inEditorZoom, bool allowDeferredRead, Action<TargetInfo> onSignature, out bool deferred)
+        {
+            deferred = false;
             if (VesselModuleRegistry.IgnoredVesselTypes.Contains(v.vesselType)) Debug.LogError($"[BDArmory.RadarUtils]: Rendering radar snapshot of {v.vesselName}, which should be being ignored!");
             bool aspected = BDArmorySettings.ASPECTED_RCS;
             float[,] rcsAspects = (aspected) ? rcsAspectsRealTime : rcsAspectsConstant;
@@ -770,31 +790,74 @@ namespace BDArmory.Radar
             Vector3 aspect;
             // In flight, the aspects are rendered into one atlas and read back together; the per-aspect read-back remains for the editor
             // (which shows the textures) and for platforms that can't copy between render targets.
-            bool useAtlas = HighLogic.LoadedSceneIsFlight && !inEditorZoom && EnsureAtlas(numAspects);
-            float[] checkValues = useAtlas && rcsCheckEnabled ? new float[numAspects] : null;
+            // Where the caller can wait for it, the aspects are summed on the GPU and read back a few frames later instead (no stall);
+            // in check mode the atlas is then read back as well and compared when the GPU sums arrive.
+            // Better still, all aspects are drawn at once by instancing (GPU.RcsInstancedRender) instead of one camera render each.
+            bool deferredRead = allowDeferredRead && HighLogic.LoadedSceneIsFlight && !inEditorZoom;
             rcsMaterialsPrepared = false;
-            if (useAtlas)
+            RenderTexture aspectSlices = null;
+            if (deferredRead && GPU.RcsInstancedRender.Available)
             {
+                if (instancedVP.Length < numAspects) { instancedVP = new Matrix4x4[numAspects]; instancedLight = new Vector4[numAspects]; }
                 for (int i = 0; i < numAspects; i++)
                 {
                     aspect = t.TransformDirection(rcsDirArray[i]);
-                    if (checkValues != null)
-                    {
-                        RenderSinglePassLegacy(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, drawTextureVariable);
-                        checkValues[i] = SumPixels(drawTextureVariable.GetPixels32());
-                    }
-                    RenderSinglePass(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, null);
-                    Graphics.CopyTexture(rcsRenderingVariable, 0, 0, 0, 0, radarResolution, radarResolution, rcsAtlas, 0, 0, i * radarResolution, 0);
+                    SetupRadarCamera(t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable);
+                    instancedVP[i] = GL.GetGPUProjectionMatrix(radarCam.projectionMatrix, true) * radarCam.worldToCameraMatrix;
+                    instancedLight[i] = -aspect;
                 }
-                RenderTexture.active = rcsAtlas;
-                rcsAtlasTexture.ReadPixels(new Rect(0, 0, numAspects * radarResolution, radarResolution), 0, 0);
-                RenderTexture.active = null;
+                PrepareRadarMaterials(v);
+                aspectSlices = GPU.RcsInstancedRender.Render(v, BDAShaderLoader.RCSShader, radarResolution, numAspects, instancedVP, instancedLight);
+            }
+            bool instanced = aspectSlices != null && GPU.RcsGpuReduction.BeginSlices(numAspects, aspectSlices);
+            bool gpuSum = instanced || deferredRead && GPU.RcsGpuReduction.Begin(numAspects, rcsRenderingVariable);
+            bool useAtlas = HighLogic.LoadedSceneIsFlight && !inEditorZoom && (!gpuSum || rcsCheckEnabled) && EnsureAtlas(numAspects);
+            float[] checkValues = useAtlas && rcsCheckEnabled ? new float[numAspects] : null;
+            if (useAtlas || gpuSum && !instanced)
+            {
+                try
+                {
+                    for (int i = 0; i < numAspects; i++)
+                    {
+                        aspect = t.TransformDirection(rcsDirArray[i]);
+                        if (checkValues != null && !gpuSum)
+                        {
+                            RenderSinglePassLegacy(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, drawTextureVariable);
+                            checkValues[i] = SumPixels(drawTextureVariable.GetPixels32());
+                        }
+                        RenderSinglePass(v, t, false, aspect, vesselbounds, radarDistance, radarFOV, rcsRenderingVariable, null);
+                        if (gpuSum && !instanced) GPU.RcsGpuReduction.Accumulate(i);
+                        if (useAtlas) Graphics.CopyTexture(rcsRenderingVariable, 0, 0, 0, 0, radarResolution, radarResolution, rcsAtlas, 0, 0, i * radarResolution, 0);
+                    }
+                }
+                catch
+                {
+                    if (gpuSum) GPU.RcsGpuReduction.Cancel();
+                    throw;
+                }
+                if (useAtlas)
+                {
+                    RenderTexture.active = rcsAtlas;
+                    rcsAtlasTexture.ReadPixels(new Rect(0, 0, numAspects * radarResolution, radarResolution), 0, 0);
+                    RenderTexture.active = null;
+                }
             }
             var atlasData = useAtlas ? rcsAtlasTexture.GetRawTextureData<byte>() : default;
             int atlasWidth = rcsAtlasAspects * radarResolution;
+            if (gpuSum)
+            {
+                // CPU sums of the same renders, for the check against the GPU sums.
+                if (checkValues != null)
+                    for (int i = 0; i < numAspects; i++) checkValues[i] = AtlasTileSum(atlasData, atlasWidth, i) / 255f;
+                deferred = true;
+                string vesselName = v.vesselName;
+                string path = instanced ? $"instanced ({GPU.RcsInstancedRender.LastDraws} draws)" : $"per-aspect cameras ({GPU.RcsInstancedRender.LastFallback ?? "instancing off"})";
+                var targetInfo = ti;
+                GPU.RcsGpuReduction.End(numAspects, sums => OnGpuSums(sums, v, vesselName, targetInfo, rcsAspects, numAspects, checkValues, onSignature, path));
+            }
             float largestDifference = 0f;
             // Loop through all aspects
-            for (int i = 0; i < numAspects; i++)
+            for (int i = 0; i < numAspects && !gpuSum; i++)
             {
                 // Determine camera vector for aspect
                 aspect = t.TransformDirection(rcsDirArray[i]);
@@ -803,18 +866,8 @@ namespace BDArmory.Radar
 
                 if (useAtlas)
                 {
-                    // Count pixel colors in this aspect's tile of the atlas (3 bytes per pixel).
-                    long sum = 0;
-                    for (int y = 0; y < radarResolution; ++y)
-                    {
-                        int index = 3 * (y * atlasWidth + i * radarResolution);
-                        for (int x = 0; x < radarResolution; ++x, index += 3)
-                        {
-                            byte r = atlasData[index], g = atlasData[index + 1], b = atlasData[index + 2];
-                            sum += r > g ? (r > b ? r : b) : (g > b ? g : b);
-                        }
-                    }
-                    rcsVariable = sum / 255f;
+                    // Count pixel colors in this aspect's tile of the atlas.
+                    rcsVariable = AtlasTileSum(atlasData, atlasWidth, i) / 255f;
                     if (checkValues != null) largestDifference = Mathf.Max(largestDifference, Mathf.Abs(rcsVariable - checkValues[i]) / Mathf.Max(1f, checkValues[i]));
                 }
                 else
@@ -893,14 +946,17 @@ namespace BDArmory.Radar
                 }
             }
 
-            if (checkValues != null) Debug.Log($"[BDArmory.RadarUtils]: RCS check {v.vesselName}: {numAspects} aspects, largest relative difference between the atlas and the per-aspect render {largestDifference:G3}");
+            if (checkValues != null && !gpuSum) Debug.Log($"[BDArmory.RadarUtils]: RCS check {v.vesselName}: {numAspects} aspects, largest relative difference between the atlas and the per-aspect render {largestDifference:G3}");
 
-            // Re-size array for overall RCS calc when aspected RCS is enabled
-            if (BDArmorySettings.ASPECTED_RCS)
-                Array.Resize(ref rcsValues, numAspectsForOverallRTEval);
+            if (!gpuSum)
+            {
+                // Re-size array for overall RCS calc when aspected RCS is enabled
+                if (BDArmorySettings.ASPECTED_RCS)
+                    Array.Resize(ref rcsValues, numAspectsForOverallRTEval);
 
-            // Use third quartile for the total RCS (gives better results than average)
-            rcsTotal = (float)Percentile(rcsValues, 75d);
+                // Use third quartile for the total RCS (gives better results than average)
+                rcsTotal = (float)Percentile(rcsValues, 75d);
+            }
 
             // If we are in the editor, render the three highest RCS aspects
             if (inEditorZoom)
@@ -1018,13 +1074,80 @@ namespace BDArmory.Radar
                 Debug.Log($"[BDArmory.RadarUtils]: - Vessel all-aspect rcs is: rcsTotal: {rcsTotal}");
             }
 
-            if (ti is not null)
+            if (gpuSum)
+            {
+                // The signature arrives with the GPU read-back; until then the previous one stays (none for a first render).
+                if (ti is not null && ti.radarBaseSignature == -1)
+                {
+                    ti.radarBaseSignature = 0f;
+                    ti.radarSignatureMatrix = null;
+                }
+            }
+            else if (ti is not null)
             {
                 ti.radarBaseSignature = rcsTotal;
                 ti.radarSignatureMatrix = rcsMatrix;
             }
 
             return ti;
+        }
+
+        /// <summary>
+        /// The GPU sums of a deferred signature render have arrived: the same arithmetic as the CPU path, then the signature is set.
+        /// </summary>
+        static void OnGpuSums(uint[] sums, Vessel v, string vesselName, TargetInfo ti, float[,] rcsAspects, int numAspects, float[] checkValues, Action<TargetInfo> onSignature, string path)
+        {
+            if (sums == null)
+            {
+                // Read-back failed (the GPU path is now off): render again the old way.
+                if (ti != null) { ti.radarBaseSignatureNeedsUpdate = true; ti.radarSignatureMatrixNeedsUpdate = true; }
+                return;
+            }
+            float[,] rcsMatrix = new float[numAspects, 3];
+            if (rcsValues.Length != numAspects) Array.Resize(ref rcsValues, numAspects);
+            float largestDifference = 0f;
+            int identical = 0;
+            for (int i = 0; i < numAspects; i++)
+            {
+                float rcsVariable = sums[i] / 255f;
+                if (checkValues != null)
+                {
+                    if (rcsVariable == checkValues[i]) ++identical;
+                    largestDifference = Mathf.Max(largestDifference, Mathf.Abs(rcsVariable - checkValues[i]) / Mathf.Max(1f, checkValues[i]));
+                }
+                rcsVariable /= RCS_NORMALIZATION_FACTOR;
+                rcsValues[i] = rcsVariable;
+                minRCSHeatmap = Mathf.Min(minRCSHeatmap, rcsVariable);
+                rcsMatrix[i, 0] = rcsAspects[i, 0];
+                rcsMatrix[i, 1] = rcsAspects[i, 1];
+                rcsMatrix[i, 2] = rcsVariable;
+            }
+            if (BDArmorySettings.ASPECTED_RCS)
+                Array.Resize(ref rcsValues, numAspectsForOverallRTEval);
+            float total = (float)Percentile(rcsValues, 75d);
+            if (checkValues != null) Debug.Log($"[BDArmory.RadarUtils]: RCS GPU check {vesselName}: {identical}/{numAspects} aspects identical to the per-aspect camera renders read back on the CPU, largest relative difference {largestDifference:G3}, signature {total:G6} m², GPU path {path}");
+            if (ti == null || v == null) return; // Vessel gone meanwhile.
+            ti.radarBaseSignature = total;
+            ti.radarSignatureMatrix = rcsMatrix;
+            if (BDArmorySettings.DEBUG_RADAR) Debug.Log($"[BDArmory.RadarUtils]: - Vessel all-aspect rcs (GPU) of {vesselName}: {total}");
+            BDAStealth.Patches.RecordRender(v, ti);
+            onSignature?.Invoke(ti);
+        }
+
+        /// <summary>Radar return of one aspect's tile of the read-back atlas (3 bytes per pixel), in 8-bit units.</summary>
+        static long AtlasTileSum(Unity.Collections.NativeArray<byte> atlasData, int atlasWidth, int tile)
+        {
+            long sum = 0;
+            for (int y = 0; y < radarResolution; ++y)
+            {
+                int index = 3 * (y * atlasWidth + tile * radarResolution);
+                for (int x = 0; x < radarResolution; ++x, index += 3)
+                {
+                    byte r = atlasData[index], g = atlasData[index + 1], b = atlasData[index + 2];
+                    sum += r > g ? (r > b ? r : b) : (g > b ? g : b);
+                }
+            }
+            return sum;
         }
 
         public static void SetConformalDecalRendering(Vessel v, bool renderEnabled)
@@ -1310,10 +1433,9 @@ namespace BDArmory.Radar
         /// <summary>
         /// Internal helper method
         /// </summary>
-        private static void RenderSinglePass(Vessel v, Transform t, bool inEditorZoom, Vector3 cameraDirection, Bounds vesselbounds, float radarDistance, float radarFOV, RenderTexture rcsRendering, Texture2D rcsTexture)
+        /// <summary>Place the radar camera for one aspect.</summary>
+        private static void SetupRadarCamera(Transform t, bool inEditorZoom, Vector3 cameraDirection, Bounds vesselbounds, float radarDistance, float radarFOV, RenderTexture rcsRendering)
         {
-            // Render one snapshop pass:
-            // setup camera FOV
             radarCam.allowMSAA = false; // Don't allow MSAA with RCS render as this significantly affects results!
             radarCam.transform.position = vesselbounds.center + cameraDirection * radarDistance;
             radarCam.transform.LookAt(vesselbounds.center, -t.forward);
@@ -1324,7 +1446,13 @@ namespace BDArmory.Radar
                 radarCam.fieldOfView = Mathf.Atan(vesselbounds.size.magnitude / distanceToShip) * 180 / Mathf.PI;
             else
                 radarCam.fieldOfView = radarFOV;
-            // setup rendertexture
+            radarCam.targetTexture = rcsRendering;
+        }
+
+        private static void RenderSinglePass(Vessel v, Transform t, bool inEditorZoom, Vector3 cameraDirection, Bounds vesselbounds, float radarDistance, float radarFOV, RenderTexture rcsRendering, Texture2D rcsTexture)
+        {
+            // Render one snapshop pass:
+            SetupRadarCamera(t, inEditorZoom, cameraDirection, vesselbounds, radarDistance, radarFOV, rcsRendering);
 
             if (!rcsMaterialsPrepared) PrepareRadarMaterials(v);
             Vector4 lightDirection = -cameraDirection;

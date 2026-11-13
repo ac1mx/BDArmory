@@ -76,3 +76,13 @@ Icon
 # Files that might appear on external disk
 .Spotlight-V100
 .Trashes
+
+# GPU shader bundle project (Unity 2019.4.18f1)
+!Unity/Packages/
+Unity/Library/
+Unity/Temp/
+Unity/Logs/
+Unity/Build/
+Unity/UserSettings/
+Unity/*.csproj
+Unity/*.sln

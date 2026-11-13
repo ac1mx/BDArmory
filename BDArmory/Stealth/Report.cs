@@ -80,12 +80,12 @@ namespace BDAStealth
                 // Stock render first (no per-part reflectivity limit), then the current-rules render that stays live.
                 var one = new List<Vessel> { v };
                 float stockBase; float[,] stockM;
-                try { Patches.RenderStock = true; RadarUtils.ForceUpdateRadarCrossSections(one); }
+                try { Patches.RenderStock = true; RadarUtils.ForceUpdateRadarCrossSections(one, allowDeferredRead: false); }
                 finally { Patches.RenderStock = false; }
                 TargetInfo ti = RadarUtils.GetVesselRadarSignature(v);
                 if (ti == null) continue;
                 stockBase = ti.radarBaseSignature; stockM = (float[,])ti.radarSignatureMatrix?.Clone();
-                RadarUtils.ForceUpdateRadarCrossSections(one);
+                RadarUtils.ForceUpdateRadarCrossSections(one, allowDeferredRead: false);
                 ti = RadarUtils.GetVesselRadarSignature(v);
                 float baseRcs = ti.radarBaseSignature;
                 sb.AppendLine();
