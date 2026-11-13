@@ -158,12 +158,21 @@
     <Compile Include="Control\PilotTactics.cs" />
     <Compile Include="Control\VIPTracker.cs" />
     <Compile Include="Control\ShotModel.cs" />
+    <Compile Include="Control\MissileFlyout.cs" />
+    <Compile Include="Control\PilotBFM.cs" />
+    <Compile Include="Control\PilotMissileDefence.cs" />
+    <Compile Include="Control\PilotEngagement.cs" />
+    <Compile Include="Control\PilotSection.cs" />
+    <Compile Include="Control\PilotMatchup.cs" />
     <Compile Include="Stealth\*.cs" />
     <Compile Include="Control\BDModuleSurfaceAI.cs" />
     <Compile Include="Control\BDModuleVTOLAI.cs" />
     <Compile Include="Control\IBDAIControl.cs" />
     <Compile Include="Control\MissileFire.cs" />
     <Compile Include="Control\MissileFire.Cockpit.cs" />
+    <Compile Include="Control\MissileFire.TestRange.cs" />
+    <Compile Include="Control\MissileFire.Salvo.cs" />
+    <Compile Include="Testing\*.cs" />
     <Compile Include="Control\ModuleWingCommander.cs" />
     <Compile Include="CounterMeasure\CMBubble.cs" />
     <Compile Include="CounterMeasure\CMChaff.cs" />
@@ -222,6 +231,7 @@
     <Compile Include="GameModes\Asteroids.cs" />
     <Compile Include="GameModes\BattleDamage\BattleDamageHandler.cs" />
     <Compile Include="GameModes\BattleDamage\BattleDamageTracker.cs" />
+    <Compile Include="GameModes\BattleDamage\AirframeIntegrity.cs" />
     <Compile Include="GameModes\ModuleSpaceFriction.cs" />
     <Compile Include="GameModes\Mutators\BDAMutator.cs" />
     <Compile Include="GameModes\Mutators\MutatorInfo.cs" />
@@ -340,6 +350,7 @@
     <Compile Include="Utils\UIControlUtils.cs" />
     <Compile Include="Utils\VectorUtils.cs" />
     <Compile Include="Utils\VesselModuleRegistry.cs" />
+    <Compile Include="Utils\JointProbe.cs" />
     <Compile Include="Utils\VesselUtils.cs" />
     <Compile Include="VesselSpawning\CircularSpawning.cs" />
     <Compile Include="VesselSpawning\ContinuousSpawning.cs" />

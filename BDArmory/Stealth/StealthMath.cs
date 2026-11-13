@@ -220,16 +220,24 @@ namespace BDAStealth
         /// <summary>Radar cross-section of one chaff bloom, m^2.</summary>
         public const float ChaffCloudRcs = 5f;
 
+        /// <summary>Scale (m/s) of a pulse-doppler seeker's velocity gate: chaff at rest in the air competes with a target only within it.</summary>
+        public const float DopplerGate = 50f;
+        /// <summary>Share of a bundle's effect left when the chaff sits outside the velocity gate (range-gate and leading-edge effects).</summary>
+        public const float OffGateChaff = 0.03f;
+
+        /// <summary>How far chaff at rest falls inside the velocity gate on a target with this speed along the line of sight (0–1).</summary>
+        public static float DopplerOverlap(float radialSpeed) => (float)Math.Exp(-(radialSpeed / DopplerGate) * (radialSpeed / DopplerGate));
+
         /// <summary>
         /// Chance that one chaff bundle pulls a radar track onto the chaff bloom.
-        /// beam: 0 = target flying along the line of sight (bloom separated by doppler), 1 = across it (bloom inside the doppler gate).
+        /// beam: doppler overlap (DopplerOverlap): 0 = target moving along the line of sight (bloom outside the velocity gate), 1 = in the notch.
         /// Small targets hide behind the bloom better: weight cloud / (cloud + target RCS).
         /// </summary>
         public static float ChaffSeduction(float baseChance, float effectivity, float floor, float beam, float targetRcs)
         {
             float e = Math.Max(effectivity, floor);
             if (!(baseChance > 0f) || !(e > 0f)) return 0f;
-            float b = 0.2f + 0.8f * Math.Min(Math.Max(beam, 0f), 1f);
+            float b = OffGateChaff + (1f - OffGateChaff) * Math.Min(Math.Max(beam, 0f), 1f);
             float size = ChaffCloudRcs / (ChaffCloudRcs + Math.Max(targetRcs, 0f));
             return Math.Min(MaxDecoyChance, baseChance * e * b * size);
         }

@@ -532,6 +532,8 @@ namespace BDArmory.Targeting
             return 0;
         }
 
+        bool EngagedBy(MissileFire mf) => mf != null && friendliesEngaging.TryGetValue(mf.Team, out var friendlies) && friendlies.Contains(mf);
+
         public float MaxThrust(Vessel v)
         {
             float maxThrust = 0;
@@ -659,7 +661,8 @@ namespace BDArmory.Targeting
             if (myMf == null || myMf.wingCommander == null) return 0;
             float teammates = myMf.wingCommander.friendlies.Count;
             if (teammates == 0) return 0; // No teammates
-            float friendsEngaging = Mathf.Max(NumFriendliesEngaging(myMf.Team) - 1, 0);
+            // Teammates other than us: subtracting one regardless counted a bandit a teammate alone is on as free, so pairs never sorted.
+            float friendsEngaging = Mathf.Max(NumFriendliesEngaging(myMf.Team) - (EngagedBy(myMf) ? 1 : 0), 0);
             friendsEngaging = 1 - Mathf.Clamp(friendsEngaging / teammates, 0f, 1f);
             friendsEngaging = friendsEngaging == 0f ? -1f : friendsEngaging;
             return friendsEngaging; // Range is -1, 0 to 1. -1 if all teammates are engaging target, between 0-1 otherwise depending on number of teammates engaging

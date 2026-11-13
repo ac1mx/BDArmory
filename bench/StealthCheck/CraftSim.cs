@@ -142,7 +142,7 @@ static class CraftSim
                     }
                 else
                 {
-                    float beam = 1f - Math.Clamp(MathF.Abs(Vector2.Dot(jv, los / dist)) / JetSpeed, 0f, 1f);
+                    float beam = StealthMath.DopplerOverlap(MathF.Abs(Vector2.Dot(jv, los / dist)));
                     float chance = StealthMath.ChaffSeduction(ChaffChance, 1f, CmFloor, beam, AspectRcs(craft, ecm, Vector2.Dot(jh, -los / dist)));
                     for (int p = 0; p < craft.ChaffPods; p++)
                         if (rng.NextDouble() < chance) { seducedUntil = t + U(1.5f, 3.5f); bloom = j; break; }

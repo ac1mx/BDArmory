@@ -42,6 +42,22 @@ namespace BDAStealth
         static MissileBase flooredMissile;
         static float flooredOriginal;
 
+        /// <summary>
+        /// Chance that a flare from the seeker's target decoys an unfatigued seeker, at equal heat after its flare sensitivity; the fatigue
+        /// of the flares it has just rejected; captured when it is already following a flare. Negative when graded flares are off.
+        /// </summary>
+        internal static float FlareChance(MissileBase seeker, out float fatigue, out bool captured)
+        {
+            captured = false; fatigue = 0f;
+            if (!Settings.Enabled || !Settings.GradedFlares || seeker == null || seeker.vessel == null) return -1f;
+            if (seekerStates.TryGetValue(seeker.vessel, out SeekerState st))
+            {
+                captured = st.Captured != null;
+                fatigue = StealthMath.FlareFatigue(st.Fatigue, Time.time - st.FatigueTime);
+            }
+            return StealthMath.FlareCapture(1f, Settings.FlareChance, seeker.flareEffectivity, Settings.CmFloor);
+        }
+
         internal static void HeatPrefix(Vessel missileVessel)
         {
             ctxMissile = missileVessel;

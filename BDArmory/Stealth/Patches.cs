@@ -12,6 +12,7 @@ using BDArmory.Radar;
 using BDArmory.Targeting;
 using BDArmory.UI;
 using BDArmory.Weapons.Missiles;
+using BDArmory.WeaponMounts;
 using UnityEngine;
 
 namespace BDAStealth
@@ -20,20 +21,29 @@ namespace BDAStealth
     internal class EcmData
     {
         public float[] Factors = Array.Empty<float>();   // rcsReductionFactor of each active rcsReduction device
+        public ModuleECMJammer[] Devices = Array.Empty<ModuleECMJammer>();   // the devices, same order (their damage wears the factor)
         public float Jam;                               // summed noise jammer strength (signalSpam)
         public float LockBreak;                         // summed lockbreaker strength
         public float StockLockbreak = 1f;
         public float Parts = 1f;
         public int Version = -1;
+        float devicesChecked = float.NegativeInfinity;
         public bool Overridden;
         public Patches.Skin Skin;                       // the craft's skin record, resolved once
 
+        static readonly List<float> combineBuf = new List<float>(8);
+
         public float PartsCombined()
         {
-            if (Version != Settings.Version)
+            bool wear = Settings.BattleDamage && Devices.Length > 0 && HighLogic.LoadedSceneIsFlight;
+            if (Version != Settings.Version || (wear && Time.time - devicesChecked >= Patches.ExposureInterval))
             {
                 Version = Settings.Version;
-                Parts = Patches.CombineParts(new List<float>(Factors));
+                devicesChecked = Time.time;
+                combineBuf.Clear();
+                for (int i = 0; i < Factors.Length; i++)
+                    combineBuf.Add(wear && i < Devices.Length ? Patches.Worn(Factors[i], Patches.DeviceDamage(Devices[i])) : Factors[i]);
+                Parts = Patches.CombineParts(combineBuf);
             }
             return Parts;
         }
@@ -73,6 +83,32 @@ namespace BDAStealth
         {
             public float Coating = 1f;   // area-weighted reflectivity
             public int Hidden;           // parts whose stealth hull sits under reflective armour
+            // Battle damage and open bays since the last render (see Exposure).
+            public readonly List<SkinPart> Parts = new List<SkinPart>();
+            public float Rendered;                   // sum of area x reflectivity the last render saw
+            public float RenderedRcs;                // the RCS that render gave (m²)
+            public float RenderedSkinArea;           // skin area (bay contents not included) the render saw
+            public float ConventionalRcs;            // RCS a conventional airframe of this size would render (m²)
+            public float Breach, BreachArea;         // skin left bare where parts were lost (kept across renders)
+            public float Factor = 1f;                // RCS now / RCS rendered
+            public float Checked = float.NegativeInfinity, Logged = 1f;
+        }
+
+        /// <summary>One part as the last render saw it: its weight (area), full hitpoints, and the bay that hides it or that it is the doors of.</summary>
+        internal struct SkinPart
+        {
+            public HitpointTracker Hp;
+            public float Area, MaxHp;
+            public Bay Bay;
+            public bool Inside;   // carried inside the bay (its missiles, a deployable rail): seen only as far as the bay is open
+        }
+
+        /// <summary>A weapons bay: cargo bay doors or a deployable rail, and how far it is open (0 shut, 1 open).</summary>
+        internal sealed class Bay
+        {
+            public ModuleAnimateGeneric Doors; public float Closed;
+            public BDDeployableRail Rail;
+            public float Open => Rail != null ? Rail.DeployFraction : Doors != null ? Mathf.Clamp01(Mathf.Abs(Doors.animTime - Closed)) : 0f;
         }
         static readonly ConditionalWeakTable<Vessel, Skin> skins = new ConditionalWeakTable<Vessel, Skin>();
 
@@ -110,13 +146,14 @@ namespace BDAStealth
                 if (j == null || j.isMissileECM || !include(j)) continue;
                 if (j.signalSpam) { noise += nw * j.jammerStrength; nw *= 0.75f; }
                 if (j.lockBreaker) { lockBreak += lw * j.lockBreakerStrength; lw *= 0.65f; }
-                if (j.rcsReduction) factors.Add(j.rcsReductionFactor);
+                if (j.rcsReduction) factors.Add(Settings.BattleDamage && HighLogic.LoadedSceneIsFlight ? Worn(j.rcsReductionFactor, DeviceDamage(j)) : j.rcsReductionFactor);
             }
         }
 
         /// <summary>Signal a missile's own radar seeker gets from a craft at rangeKm, for a given ECM state (see SignaturePostfix).</summary>
         public static float SeekerSignal(Vessel v, float baseRcs, float noise, float lockBreak, List<float> factors, float rangeKm)
         {
+            baseRcs *= Exposure(v);
             float rcsr = StealthMath.LimitedReduction(CombineParts(factors), Coating(v), Settings.StealthLimit);
             float reduced = Settings.ApplyRcsReduction ? baseRcs * rcsr : baseRcs;
             return reduced * StealthMath.JamFactor(lockBreak, baseRcs * rcsr, rangeKm, Settings.BurnThroughKm) + (Settings.HomeOnJam ? noise / 100f : 0f);
@@ -186,6 +223,10 @@ namespace BDAStealth
             if (v?.parts == null) return;
             bool clamp = Settings.Enabled && !RenderStock;
             float limit = clamp ? Settings.StealthLimit : 0f;
+            // In flight the parts the render sees are recorded, so damage and open bays can be measured against it (see Exposure).
+            Skin live = clamp && Settings.BattleDamage && HighLogic.LoadedSceneIsFlight ? skins.GetValue(v, _ => new Skin()) : null;
+            if (live != null) live.Parts.Clear();
+            float rendered = 0f, skinArea = 0f;
             int hidden = 0;
             foreach (Part p in v.parts)
             {
@@ -199,6 +240,14 @@ namespace BDAStealth
                     if (clamp && Settings.SkinStacking) r = StealthMath.SkinReflectivity(hull, armour, hp.Armor);
                     if (hull < 1f && armour >= 1f && r > hull + 0.05f) hidden++;
                 }
+                if (live != null)
+                {
+                    SkinPart sp = new SkinPart { Hp = hp, Area = hp.armorVolume > 0f ? hp.armorVolume : 1f, MaxHp = hp.GetMaxHitpoints() };
+                    sp.Bay = BayOf(p, out sp.Inside);
+                    live.Parts.Add(sp);
+                    rendered += sp.Area * Mathf.Max(r, limit) * (sp.Inside ? sp.Bay.Open : 1f);
+                    if (!sp.Inside) skinArea += sp.Area;
+                }
                 areaBuf.Add(hp.armorVolume); reflBuf.Add(r);
                 if (clamp && r < limit) r = limit;
                 if (r != stock)
@@ -210,13 +259,155 @@ namespace BDAStealth
             float c = StealthMath.CoatingFactor(areaBuf, reflBuf, limit);
             if (RenderStock) return;   // report-only stock render: don't overwrite the live skin data
             if (HighLogic.LoadedSceneIsEditor) { EditorCoating = c; EditorHidden = hidden; EditorRenders++; }
-            else { Skin s = skins.GetValue(v, _ => new Skin()); s.Coating = c; s.Hidden = hidden; }
+            else
+            {
+                Skin s = skins.GetValue(v, _ => new Skin()); s.Coating = c; s.Hidden = hidden;
+                if (live != null)
+                {
+                    live.Rendered = rendered;
+                    live.RenderedSkinArea = skinArea;
+                    Vector3 size = v.vesselSize; // width, height, length
+                    live.ConventionalRcs = ConventionalRcsPerArea * (size.x * size.y + size.y * size.z + size.x * size.z) / 3f;
+                    live.Checked = float.NegativeInfinity;   // breaches from before this render still count
+                }
+            }
         }
 
-        internal static void RenderFinalizer()
+        // ---- battle damage: a damaged stealth airframe and open weapons bays reflect more ----
+
+        /// <summary>Seconds between re-measurements of a craft's skin.</summary>
+        public const float ExposureInterval = 0.5f;
+        /// <summary>
+        /// Rendered RCS (m²) of a conventional fighter per m² of its mean face area (the average of its bounding box's front, side
+        /// and top): the Su-47 renders 34.0 m² with a 220.5 m² mean face. Damaged skin and breaches reflect like such an airframe of
+        /// the craft's size, so a stealth craft loses its shaping and coating where it is hit (F-22A L 1.7 m² intact, 24 m² for a
+        /// conventional airframe its size; YF-23 0.68 m² / 35 m²).
+        /// </summary>
+        const float ConventionalRcsPerArea = 0.154f;
+        /// <summary>A lost part leaves a bare breach of this fraction of its area: the torn joint, not the whole panel.</summary>
+        const float BreachFraction = 0.25f;
+
+        /// <summary>Reflectivity r worn toward bare metal (1) by a fraction w (damaged coating).</summary>
+        public static float Worn(float r, float w) => r < 1f ? r + (1f - r) * Mathf.Clamp01(w) : r;
+
+        /// <summary>Fraction of a part's hitpoints (armour integrity for an armour panel) it has lost.</summary>
+        static float Damage(HitpointTracker hp, float maxHp)
+        {
+            float intact = hp.ArmorPanel ? hp.ArmorRemaining / 100f : maxHp > 0f ? hp.Hitpoints / maxHp : 1f;
+            return Mathf.Clamp01(1f - intact);
+        }
+
+
+        /// <summary>Fraction of its hitpoints an RCS-reduction device has lost (a destroyed one counts as fully worn).</summary>
+        public static float DeviceDamage(ModuleECMJammer j)
+        {
+            if (j == null || j.part == null) return 1f;
+            HitpointTracker hp = j.part.GetComponent<HitpointTracker>();
+            return hp == null ? 0f : Damage(hp, hp.GetMaxHitpoints());
+        }
+
+        /// <summary>
+        /// The weapons bay a part belongs to: bay doors (part of the skin, inside = false), a deployable rail (stowed inside the
+        /// airframe), or a missile carried on either (inside).
+        /// </summary>
+        static Bay BayOf(Part p, out bool inside)
+        {
+            Bay own = BayModule(p);
+            inside = own != null && own.Rail != null;
+            if (own != null || p.parent == null || p.FindModuleImplementing<MissileBase>() == null) return own;
+            inside = true;
+            return BayModule(p.parent);
+        }
+
+        static Bay BayModule(Part p)
+        {
+            BDDeployableRail rail = p.FindModuleImplementing<BDDeployableRail>();
+            if (rail != null) return new Bay { Rail = rail };
+            ModuleCargoBay cargo = p.FindModuleImplementing<ModuleCargoBay>();
+            if (cargo != null && cargo.DeployModuleIndex >= 0 && cargo.DeployModuleIndex < p.Modules.Count && p.Modules[cargo.DeployModuleIndex] is ModuleAnimateGeneric doors)
+                return new Bay { Doors = doors, Closed = cargo.closedPosition };
+            return null;
+        }
+
+        /// <summary>
+        /// RCS multiplier for what has happened to a craft since its last render, 1 = as rendered. Each part's lost hitpoints are
+        /// that share of its skin damaged: bare metal that reflects like a conventional airframe of the craft's size, so it loses
+        /// both coating and shaping; a lost part leaves a smaller breach that does the same. An open bay shows its contents. A
+        /// conventional craft never goes above its render, so this only takes stealth away.
+        /// </summary>
+        public static float Exposure(Vessel v) => v != null && skins.TryGetValue(v, out Skin s) ? Exposure(v, s) : 1f;
+
+        static float Exposure(Vessel v, Skin s)
+        {
+            if (!Settings.Enabled || !Settings.BattleDamage || !HighLogic.LoadedSceneIsFlight) return 1f;
+            if (Time.time - s.Checked >= ExposureInterval) Measure(v, s);
+            return s.Factor;
+        }
+
+        static readonly System.Diagnostics.Stopwatch exposureWatch = new System.Diagnostics.Stopwatch();
+        static int exposureMeasures;
+
+        static void Measure(Vessel v, Skin s)
+        {
+            s.Checked = Time.time;
+            if (!(s.Rendered > 0f)) { s.Factor = 1f; return; }
+            exposureWatch.Start();
+            float limit = Settings.StealthLimit;
+            float intact = 0f, bare = s.Breach;              // skin still as rendered (area x reflectivity) / skin area left bare
+            float skinRefl = s.Breach, skinArea = s.BreachArea;
+            for (int i = s.Parts.Count - 1; i >= 0; i--)
+            {
+                SkinPart sp = s.Parts[i];
+                HitpointTracker hp = sp.Hp;
+                if (hp == null || hp.part == null || hp.part.vessel != v)
+                {
+                    // Gone. Bay contents and ordnance that left (a launched missile) take nothing with them. A destroyed or torn-off
+                    // part of the airframe leaves a bare breach where it was attached.
+                    if (!sp.Inside && (hp == null || hp.part == null || hp.part.FindModuleImplementing<MissileBase>() == null))
+                    {
+                        float breach = BreachFraction * sp.Area;
+                        s.Breach += breach; s.BreachArea += breach;
+                        bare += breach; skinRefl += breach; skinArea += breach;
+                    }
+                    s.Parts[i] = s.Parts[s.Parts.Count - 1];
+                    s.Parts.RemoveAt(s.Parts.Count - 1);
+                    continue;
+                }
+                float r = hp.radarReflectivity;
+                if (hp.ArmorTypeNum > 1f && hp.Armor > 0f && Settings.SkinStacking) r = StealthMath.SkinReflectivity(hp.hullRadarReturnFactor, hp.armorRadarReturnFactor, hp.Armor);
+                r = Mathf.Max(r, limit);
+                // Missiles and rails hanging out of an open bay: seen as far as it is open, at the rendered rate (a render with the
+                // F-22A L's rails out gives 2.58 m² against 1.71 m² stowed, which this reproduces).
+                if (sp.Inside) { intact += sp.Area * r * sp.Bay.Open; continue; }
+                float d = Damage(hp, sp.MaxHp);
+                intact += (1f - d) * sp.Area * r;
+                bare += d * sp.Area;
+                skinRefl += sp.Area * Worn(r, d); skinArea += sp.Area;
+            }
+            // Intact skin keeps the craft's rendered rate; bare skin reflects like a conventional airframe of the craft's size (never
+            // less than the rendered rate of uncoated skin), and the whole never exceeds that conventional airframe.
+            float conventional = Mathf.Max(s.ConventionalRcs, s.RenderedRcs);
+            float barePerArea = s.RenderedRcs > 0f && s.RenderedSkinArea > 0f ? Mathf.Max(conventional / (s.RenderedRcs * s.RenderedSkinArea), 1f / s.Rendered) : 1f / s.Rendered;
+            s.Factor = intact / s.Rendered + bare * barePerArea;
+            if (s.RenderedRcs > 0f) s.Factor = Mathf.Min(s.Factor, conventional / s.RenderedRcs);
+            if (skinArea > 0f) s.Coating = skinRefl / skinArea;
+            exposureWatch.Stop();
+            ++exposureMeasures;
+            if (Mathf.Abs(s.Factor / s.Logged - 1f) > 0.1f)
+            {
+                s.Logged = s.Factor;
+                Debug.Log($"[BDAStealth] Exposure: {v.vesselName} RCS x{s.Factor:0.00} of its render, {s.Factor * s.RenderedRcs:0.00} m² (bare/open skin {bare:0.0} of {s.RenderedSkinArea:0.0}, conventional {s.ConventionalRcs:0.0} m², breaches {s.BreachArea:0.0}); {exposureMeasures} measures, {exposureWatch.Elapsed.TotalMilliseconds / exposureMeasures * 1000:0} us each");
+            }
+        }
+
+        internal static void RenderFinalizer(Vessel v, TargetInfo ti)
         {
             for (int i = 0; i < renderParts.Count; i++) if (renderParts[i] != null) renderParts[i].radarReflectivity = renderRefl[i];
             renderParts.Clear(); renderRefl.Clear();
+            if (RenderStock || ti == null || v == null || !HighLogic.LoadedSceneIsFlight || !skins.TryGetValue(v, out Skin s) || s.Parts.Count == 0) return;
+            s.RenderedRcs = ti.radarBaseSignature;
+            Vector3 size = v.vesselSize;
+            Debug.Log($"[BDAStealth] Render: {v.vesselName} RCS {s.RenderedRcs:0.000} m², skin {s.Rendered:0.0} of area {s.RenderedSkinArea:0.0}, size {size.x:0.0}x{size.y:0.0}x{size.z:0.0} m, mean face {(size.x * size.y + size.y * size.z + size.x * size.z) / 3f:0.0} m², conventional {s.ConventionalRcs:0.0} m²");
         }
 
         // ---- signatures ----
@@ -244,11 +435,9 @@ namespace BDAStealth
                 return;
             }
             e.Overridden = true;
-            if (e.Skin == null)
-            {
-                Vessel owner = v != null ? v : ti.Vessel;
-                if (owner != null) e.Skin = skins.GetValue(owner, _ => new Skin());
-            }
+            Vessel owner = v != null ? v : ti.Vessel;
+            if (e.Skin == null && owner != null) e.Skin = skins.GetValue(owner, _ => new Skin());
+            if (e.Skin != null && owner != null) baseSig *= Exposure(owner, e.Skin);
             float rcsr = StealthMath.LimitedReduction(e.PartsCombined(), e.Skin != null ? e.Skin.Coating : 1f, Settings.StealthLimit);
             float reduced = Settings.ApplyRcsReduction ? baseSig * rcsr : baseSig;
             float detect = reduced + (Settings.JammerReveals ? e.Jam / 100f : 0f);
@@ -267,6 +456,7 @@ namespace BDAStealth
         }
 
         static readonly List<float> factorBuf = new List<float>(8);
+        static readonly List<ModuleECMJammer> deviceBuf = new List<ModuleECMJammer>(8);
 
         internal static void JammerPostfix(VesselECMJInfo __instance)
         {
@@ -276,8 +466,10 @@ namespace BDAStealth
             e.StockLockbreak = ti.radarLockbreakFactor;
             factorBuf.Clear();
             List<ModuleECMJammer> list = __instance.jammers;
-            if (list != null) foreach (ModuleECMJammer j in list) if (j != null && j.rcsReduction) factorBuf.Add(j.rcsReductionFactor);
+            deviceBuf.Clear();
+            if (list != null) foreach (ModuleECMJammer j in list) if (j != null && j.rcsReduction) { factorBuf.Add(j.rcsReductionFactor); deviceBuf.Add(j); }
             e.Factors = factorBuf.ToArray();
+            e.Devices = deviceBuf.ToArray();
             e.Jam = __instance.jammerStrength;
             e.LockBreak = __instance.lockBreakStrength;
             e.Version = -1;

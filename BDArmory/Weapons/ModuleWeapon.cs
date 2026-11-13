@@ -5163,6 +5163,11 @@ namespace BDArmory.Weapons
                     autoFireFailReason = "Not safe";
                 }
                 var wm = WeaponManager;
+                if (autoFire && wm != null && wm.HoldFire)
+                {
+                    autoFire = false;
+                    autoFireFailReason = "Hold fire";
+                }
                 if (autoFire && (lastVisualTargetVessel != null && lastVisualTargetVessel.LandedOrSplashed && vessel.LandedOrSplashed))
                 {
                     if (wm.staleTarget.ContainsKey(lastVisualTargetVessel) && wm.staleTarget[lastVisualTargetVessel])

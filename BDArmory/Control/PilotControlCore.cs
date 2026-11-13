@@ -300,6 +300,87 @@ namespace BDArmory.Control
     }
 
     /// <summary>
+    /// Keeps one axis' control loop from hunting. A stick that swings back and forth faster than about 2 Hz drives the airframe beyond the
+    /// bandwidth it can follow: with the lag of the surfaces, thrust vectoring and structure that is a self-sustained oscillation of the loop,
+    /// not tracking. The loop gain at which that starts depends on the flight condition (control power, damping and lag all change with
+    /// dynamic pressure, and differently on craft with thrust vectoring), so the gain limit is learned per dynamic-pressure band: the
+    /// controller's whole output is scaled down in the band where the stick hunts and raised back slowly while it stays calm there.
+    /// </summary>
+    public sealed class LoopGainGovernor
+    {
+        static readonly float[] knots = { 5f, 15f, 27.5f, 42.5f, 60f, 82.5f, 112.5f, 150f }; // kPa, centres of the dynamic-pressure bands.
+        readonly float[] gain = { 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f };
+        const float hysteresis = 0.03f; // Stick travel back from an extreme that counts as a reversal.
+        const float minSwing = 0.08f; // Peak-to-peak stick swing that counts as part of an oscillation.
+        const float memory = 2f; // s, time constant of the reversal rate.
+        const float huntingRate = 4f, calmRate = 2f; // Reversals per second: 4/s is a 2 Hz oscillation.
+        const float cutRate = 1.5f, recoverRate = 0.02f; // Per second: how fast a band's gain falls while hunting and rises again while calm.
+        const float minGain = 0.15f;
+        // The loop can also flip the stick every physics tick, with too small a swing for the reversal count: the F-15Z2 at q 180 kPa
+        // alternates ±0.03 at 25 Hz (its damping gain times its control power is more than one 0.02 s tick can follow). Tick-to-tick
+        // reversals of the stick's change: 12/s flags 70–80% of its flight above 120 kPa and 2% below 30 kPa.
+        const float flipFloor = 0.02f, flipMemory = 0.5f, flipHuntingRate = 12f, flipCalmRate = 6f;
+        float extreme, previousExtreme, lastStick, lastStep;
+        int direction;
+        bool started;
+
+        /// <summary>Stick reversals per second over the last couple of seconds.</summary>
+        public float ReversalRate { get; private set; }
+        /// <summary>Tick-to-tick stick flips per second over the last half second.</summary>
+        public float FlipRate { get; private set; }
+        public float LowestGain { get { float g = 1f; for (int i = 0; i < gain.Length; ++i) g = Math.Min(g, gain[i]); return g; } }
+
+        /// <summary>Gain to apply to the axis' controller output at this dynamic pressure (kPa).</summary>
+        public float Gain(float dynPres)
+        {
+            Locate(dynPres, out int i, out float w);
+            return gain[i] + w * (gain[i + 1] - gain[i]);
+        }
+
+        static void Locate(float dynPres, out int i, out float w)
+        {
+            if (!(dynPres > knots[0])) { i = 0; w = 0f; return; } // Also catches NaN.
+            for (i = 0; i < knots.Length - 2 && dynPres > knots[i + 1]; ++i) { }
+            w = Math.Min(1f, (dynPres - knots[i]) / (knots[i + 1] - knots[i]));
+        }
+
+        /// <summary>Feed the stick actually applied this tick.</summary>
+        public void Observe(float stick, float dynPres, float dt)
+        {
+            if (!started) { extreme = previousExtreme = lastStick = stick; started = true; }
+            ReversalRate *= (float)Math.Exp(-dt / memory);
+            FlipRate *= (float)Math.Exp(-dt / flipMemory);
+            float step = stick - lastStick;
+            lastStick = stick;
+            if (Math.Abs(step) > flipFloor)
+            {
+                if (step * lastStep < 0f) FlipRate += 1f / flipMemory;
+                lastStep = step;
+            }
+            if (direction == 0) // Not moving yet.
+            {
+                if (Math.Abs(stick - extreme) > hysteresis) { direction = stick > extreme ? 1 : -1; previousExtreme = extreme; extreme = stick; }
+            }
+            else if (direction > 0 ? stick > extreme : stick < extreme) extreme = stick; // Still moving the same way.
+            else if (Math.Abs(stick - extreme) > hysteresis) // Turned back.
+            {
+                if (Math.Abs(extreme - previousExtreme) >= minSwing) ReversalRate += 1f / memory;
+                direction = -direction;
+                previousExtreme = extreme;
+                extreme = stick;
+            }
+
+            float factor, excess = Math.Max(ReversalRate / huntingRate, FlipRate / flipHuntingRate) - 1f;
+            if (excess > 0f) factor = (float)Math.Exp(-cutRate * Math.Min(excess, 2f) * dt);
+            else if (ReversalRate < calmRate && FlipRate < flipCalmRate) factor = (float)Math.Exp(recoverRate * dt);
+            else return;
+            Locate(dynPres, out int i, out float w);
+            gain[i] = Math.Max(minGain, Math.Min(1f, gain[i] * (float)Math.Pow(factor, 1f - w)));
+            gain[i + 1] = Math.Max(minGain, Math.Min(1f, gain[i + 1] * (float)Math.Pow(factor, w)));
+        }
+    }
+
+    /// <summary>
     /// Three-axis attitude controller built from identified per-axis models.
     /// </summary>
     public sealed class PilotControlCore
@@ -307,6 +388,8 @@ namespace BDArmory.Control
         public readonly AxisRateController pitch = new AxisRateController { bandwidth = 5f };
         public readonly AxisRateController yaw = new AxisRateController { bandwidth = 4f };
         public readonly AxisRateController roll = new AxisRateController { bandwidth = 7f, integralGain = 0.5f };
+        // The craft's learned gain limits: kept across resets of the identified models.
+        public readonly LoopGainGovernor pitchGovernor = new LoopGainGovernor(), yawGovernor = new LoopGainGovernor(), rollGovernor = new LoopGainGovernor();
 
         /// <summary>Lowest per-axis model confidence, i.e., how far the model-based output can be trusted.</summary>
         public float Confidence => Math.Min(pitch.Confidence, Math.Min(yaw.Confidence, roll.Confidence));

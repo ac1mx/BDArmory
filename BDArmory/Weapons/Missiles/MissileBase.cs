@@ -1081,6 +1081,7 @@ namespace BDArmory.Weapons.Missiles
                     _lockFailTimer += Time.fixedDeltaTime;
                     if (_lockFailTimer > seekerTimeout)
                     {
+                        if (missReason == null) missReason = "seekerTimeout";
                         guidanceActive = false;
                     }
                 }
@@ -1098,42 +1099,85 @@ namespace BDArmory.Weapons.Missiles
             finally { BDAStealth.HeatPatches.MissileChaffFinalizer(this, chaffState); }
         }
 
-        /// <summary>
-        /// Aim point error from guiding on another radar's lock. A return well above what that radar needs to hold a lock gives a clean
-        /// track; one that only just clears it (long range, small or reduced signature) wanders, by up to 2% of the missile's distance
-        /// to the target, so the missile spends energy chasing the wander until its own seeker takes over.
-        /// </summary>
         #region Shot record
-        // With the pilot AI's metrics log enabled, each missile logs the geometry it was launched in and how close it got to the vessel it
-        // was launched at, so that launch rules can be judged by what the shots actually did.
+        // With the pilot AI's metrics log or the missile range enabled, each missile logs the geometry it was launched in and how close it
+        // got to the vessel it was launched at, so that launch rules can be judged by what the shots actually did.
+        public static readonly bool shotRecordEnabled = BDArmory.Control.BDModulePilotAI.steeringMetricsEnabled
+            || System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/missile_range.cfg"));
+        /// <summary>Extra key=value fields for the shot record, set by whoever fires the missile (e.g. the missile range's trial number).</summary>
+        public string shotContext;
+        /// <summary>Set by the launching pilot once the missile can no longer reach its target: it then stops counting towards maxMissilesOnTarget.</summary>
+        public bool judgedDefeated;
+        /// <summary>Why the missile gave up on its target (set where the miss is declared).</summary>
+        protected string missReason;
         Vessel shotTarget;
         string shotLaunch;
-        float shotMinDistance = float.MaxValue, shotMinDistanceTime;
+        float shotMinDistance = float.MaxValue, shotMinDistanceTime, shotSpeedAtClosest, shotClosingAtClosest, shotBurnoutSpeed = -1f, shotBurnoutTime = -1f, shotMaxSpeed;
+        MissileStates shotStateAtClosest;
+        int shotTicks, shotDecoyTicks, shotNoTargetTicks;
+        float shotFirstDecoyTime = -1f;
         bool shotLogged;
+
+        /// <summary>Local east, north and up components of a world vector at the missile's position.</summary>
+        Vector3 LocalENU(Vector3 world)
+        {
+            Vector3 up = (vessel.CoM - vessel.mainBody.position).normalized;
+            Vector3 north = Vector3.ProjectOnPlane(vessel.mainBody.transform.up, up).normalized;
+            Vector3 east = Vector3.Cross(up, north);
+            return new Vector3(Vector3.Dot(world, east), Vector3.Dot(world, north), Vector3.Dot(world, up));
+        }
 
         protected void RecordShotLaunch()
         {
-            if (!BDArmory.Control.BDModulePilotAI.steeringMetricsEnabled || vessel == null) return;
+            if (!shotRecordEnabled || vessel == null) return;
             shotTarget = targetVessel != null ? targetVessel.Vessel : null;
             if (shotTarget == null) { shotLaunch = null; return; }
+            // The missile's own vessel has no velocity yet on its launch frame (it was just separated): take the motion from the launcher.
+            Vessel launcher = vessel.Velocity().sqrMagnitude < 1f && SourceVessel != null ? SourceVessel : vessel;
             Vector3 toTarget = shotTarget.CoM - vessel.CoM;
             float range = toTarget.magnitude;
             Vector3 line = toTarget / Mathf.Max(range, 1f);
-            float closure = Vector3.Dot(vessel.Velocity() - shotTarget.Velocity(), line);
+            float closure = Vector3.Dot(launcher.Velocity() - shotTarget.Velocity(), line);
             float aspect = VectorUtils.Angle(shotTarget.srf_vel_direction, -line); // 0 = coming straight at the launcher, 180 = running away.
             float offBoresight = VectorUtils.Angle(GetForwardTransform(), line);
             var dlz = MissileLaunchParams.GetDynamicLaunchParams(this, shotTarget.Velocity(), shotTarget.CoM);
+            Vector3 relPos = LocalENU(toTarget), missileVel = LocalENU(launcher.Velocity()), targetVel = LocalENU(shotTarget.Velocity());
+            float estimate = BDArmory.Control.ShotModel.Estimate(this, launcher, shotTarget, out var shotFeatures);
+            var launcherPilot = SourceVessel != null ? SourceVessel.ActiveController().PilotAI : null;
+            string decision = launcherPilot != null ? launcherPilot.ShotRecordContext() : "";
             shotLaunch = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "missile={0} mode={1} from={2} at={3} range={4:F0} maxRange={5:F0} rangeFraction={6:F2} closure={7:F0} aspect={8:F0} offBoresight={9:F0} launchAlt={10:F0} targetAlt={11:F0} launchSpeed={12:F0} targetSpeed={13:F0} estimate={14:F2}",
-                shortName, TargetingMode, SourceVessel != null ? SourceVessel.vesselName : "?", shotTarget.vesselName, range, dlz.maxLaunchRange, range / Mathf.Max(1f, dlz.maxLaunchRange),
-                closure, aspect, offBoresight, vessel.radarAltitude, shotTarget.radarAltitude, vessel.srfSpeed, shotTarget.srfSpeed, BDArmory.Control.ShotModel.Estimate(this, vessel, shotTarget));
+                "missile={0} part={1} mode={2} from={3} at={4} range={5:F0} maxRange={6:F0} rangeFraction={7:F2} closure={8:F0} aspect={9:F0} offBoresight={10:F0} launchAlt={11:F0} targetAlt={12:F0} launchSpeed={13:F0} targetSpeed={14:F0} estimate={15:F2}"
+                + " launchAltMSL={16:F0} targetAltMSL={17:F0} rel={18:F0},{19:F0},{20:F0} vel={21:F0},{22:F0},{23:F0} targetVel={24:F0},{25:F0},{26:F0}{27}",
+                shortName, part != null && part.partInfo != null ? part.partInfo.name : "?", TargetingMode, SourceVessel != null ? SourceVessel.vesselName.Replace(' ', '_') : "?", shotTarget.vesselName.Replace(' ', '_'),
+                range, dlz.maxLaunchRange, range / Mathf.Max(1f, dlz.maxLaunchRange),
+                closure, aspect, offBoresight, vessel.radarAltitude, shotTarget.radarAltitude, launcher.srfSpeed, shotTarget.srfSpeed, estimate,
+                vessel.altitude, shotTarget.altitude, relPos.x, relPos.y, relPos.z, missileVel.x, missileVel.y, missileVel.z, targetVel.x, targetVel.y, targetVel.z,
+                " " + BDArmory.Control.ShotModel.Describe(shotFeatures) + decision + (string.IsNullOrEmpty(shotContext) ? "" : " " + shotContext));
         }
 
         protected void TrackShot()
         {
             if (shotLaunch == null || shotTarget == null || vessel == null) return;
-            float distance = (shotTarget.CoM - vessel.CoM).magnitude;
-            if (distance < shotMinDistance) { shotMinDistance = distance; shotMinDistanceTime = TimeIndex; }
+            Vector3 toTarget = shotTarget.CoM - vessel.CoM;
+            float distance = toTarget.magnitude;
+            float speed = (float)vessel.srfSpeed;
+            ++shotTicks;
+            if (speed > shotMaxSpeed) shotMaxSpeed = speed;
+            if (shotBurnoutTime < 0 && MissileState == MissileStates.PostThrust) { shotBurnoutTime = TimeIndex; shotBurnoutSpeed = speed; }
+            if (!TargetAcquired) ++shotNoTargetTicks;
+            else if ((TargetPosition - shotTarget.CoM).sqrMagnitude > 150f * 150f) // Guiding on something other than the target: a decoy, or a lock gone stale.
+            {
+                ++shotDecoyTicks;
+                if (shotFirstDecoyTime < 0) shotFirstDecoyTime = TimeIndex;
+            }
+            if (distance < shotMinDistance)
+            {
+                shotMinDistance = distance;
+                shotMinDistanceTime = TimeIndex;
+                shotSpeedAtClosest = speed;
+                shotClosingAtClosest = Vector3.Dot(vessel.Velocity() - shotTarget.Velocity(), toTarget / Mathf.Max(distance, 1f));
+                shotStateAtClosest = MissileState;
+            }
         }
 
         protected void RecordShotResult()
@@ -1141,15 +1185,24 @@ namespace BDArmory.Weapons.Missiles
             if (shotLaunch == null || shotLogged) return;
             shotLogged = true;
             bool targetGone = shotTarget == null || shotTarget.state == Vessel.State.DEAD;
+            float ticks = Mathf.Max(1, shotTicks);
             Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "[BDArmory.MissileBase]: MissileShot {0} minDistance={1:F0} blastRadius={2:F0} hit={3} timeToClosest={4:F1} flightTime={5:F1} endAlt={6:F0} targetDestroyed={7}",
-                shotLaunch, shotMinDistance, GetBlastRadius(), shotMinDistance <= GetBlastRadius(), shotMinDistanceTime, TimeIndex, vessel != null ? vessel.radarAltitude : -1, targetGone));
+                "[BDArmory.MissileBase]: MissileShot {0} minDistance={1:F0} blastRadius={2:F0} hit={3} timeToClosest={4:F1} flightTime={5:F1} endAlt={6:F0} targetDestroyed={7}"
+                + " speedAtClosest={8:F0} closingAtClosest={9:F0} stateAtClosest={10} burnoutTime={11:F1} burnoutSpeed={12:F0} maxSpeed={13:F0} decoyFraction={14:F2} firstDecoy={15:F1} noTargetFraction={16:F2} missReason={17}",
+                shotLaunch, shotMinDistance, GetBlastRadius(), shotMinDistance <= GetBlastRadius(), shotMinDistanceTime, TimeIndex, vessel != null ? vessel.radarAltitude : -1, targetGone,
+                shotSpeedAtClosest, shotClosingAtClosest, shotStateAtClosest, shotBurnoutTime, shotBurnoutSpeed, shotMaxSpeed, shotDecoyTicks / ticks, shotFirstDecoyTime, shotNoTargetTicks / ticks,
+                string.IsNullOrEmpty(missReason) ? "none" : missReason));
         }
         #endregion
 
         // Counts of the radar guidance fallbacks, for the pilot AI's metrics log.
         public static int radarCoastCount, seekerHandBackCount, noisyLockTicks;
 
+        /// <summary>
+        /// Aim point error from guiding on another radar's lock. A return well above what that radar needs to hold a lock gives a clean
+        /// track; one that only just clears it (long range, small or reduced signature) wanders, by up to 2% of the missile's distance
+        /// to the target, so the missile spends energy chasing the wander until its own seeker takes over.
+        /// </summary>
         Vector3 LockQualityError(TargetSignatureData track, ModuleRadar lockingRadar)
         {
             if (lockingRadar == null || lockingRadar.sonarMode != ModuleRadar.SonarModes.None) return Vector3.zero;
@@ -1406,6 +1459,7 @@ namespace BDArmory.Weapons.Missiles
                             {
                                 if (locksCount > 2)
                                 {
+                                    if (missReason == null) missReason = "activeRadarNoLock";
                                     guidanceActive = false;
                                     checkMiss = true;
                                     if (BDArmorySettings.DEBUG_MISSILES)
@@ -2261,7 +2315,11 @@ namespace BDArmory.Weapons.Missiles
                         }
                         else
                         {
-                            float optimalDistance = (float)(Math.Max(DetonationDistance, relativeSpeed));
+                            // A fragmenting warhead kills with a belt of fragments thrown out around the missile, tilted forward by its own speed
+                            // (ExplosionFx.FireFragments): it is fired when the nearest part passing within reach of the belt comes to lie in it.
+                            bool fragments = warheadType == WarheadTypes.Standard && BDArmorySettings.MISSILE_FRAGMENTS && !BDArmorySettings.PAINTBALL_MODE && !DetonateAtMinimumDistance;
+                            float fragmentReach = fragments ? Mathf.Max(DetonationDistance, 0.5f * GetBlastRadius()) : 0f;
+                            float optimalDistance = fragments ? fragmentReach + relativeSpeed : (float)(Math.Max(DetonationDistance, relativeSpeed));
                             float blastR;
                             Vector3 targetPoint = (warheadType == WarheadTypes.ContinuousRod ? vessel.CoM + (Mathf.Sign(Vector3.Dot(TargetPosition - vessel.CoM, vessel.up)) * ((blastR = GetBlastRadius()) > 0f ? Mathf.Min(blastR, DetonationDistance) / 3f : 5f)) * vessel.up : vessel.CoM);
                             var hitCount = Physics.OverlapSphereNonAlloc(targetPoint, optimalDistance, proximityHitColliders, layerMask);
@@ -2270,44 +2328,77 @@ namespace BDArmory.Weapons.Missiles
                                 proximityHitColliders = Physics.OverlapSphere(targetPoint, optimalDistance, layerMask);
                                 hitCount = proximityHitColliders.Length;
                             }
-                            using (var hitsEnu = proximityHitColliders.Take(hitCount).GetEnumerator())
+                            // The search sphere is at least one frame of closing wide, so a part found in it may come within fuze range anywhere
+                            // in the next frame or still be a frame or more away. Firing as soon as anything entered the sphere put the warhead off
+                            // at the sphere's edge, 20–40 m out at combat closing speeds, where neither the blast nor the fragment belt reaches the
+                            // craft. Instead, find when within the frame the fuze would see the part: a fragmenting warhead when the part lies in
+                            // the belt, others on entering DetonationDistance (or, set to detonate at minimum distance, the closest approach); else
+                            // the closest approach if the part is passing outside that range this frame. Move the missile on to that moment and
+                            // detonate there; if it comes later, wait for it.
+                            Vector3 fuzePoint = vessel.CoM;
+                            Vector3 missileWorldVelocity = missileVel - BDKrakensbane.FrameVelocityV3f;
+                            float frame = Time.fixedDeltaTime, fuzeRangeSqr = DetonationDistance * DetonationDistance, fragmentReachSqr = fragmentReach * fragmentReach;
+                            float missileSpeed = missileVel.magnitude;
+                            Vector3 missileAxis = missileSpeed > 1f ? missileVel / missileSpeed : vessel.transform.up;
+                            float beltCos = missileSpeed / Mathf.Sqrt(missileSpeed * missileSpeed + ExplosionFx.fragmentSpeed * ExplosionFx.fragmentSpeed); // Belt centre off the nose.
+                            bool found = false;
+                            float bestMissSqr = float.MaxValue, bestTime = 0f, entryTime = float.MaxValue;
+                            Part bestPart = null, entryPart = null;
+                            for (int i = 0; i < hitCount; ++i)
                             {
-                                while (hitsEnu.MoveNext())
+                                var collider = proximityHitColliders[i];
+                                if (collider == null) continue;
+                                try
                                 {
-                                    if (hitsEnu.Current == null) continue;
+                                    Part partHit = collider.GetComponentInParent<Part>();
 
-                                    try
+                                    if (partHit == null) continue;
+                                    if (ProjectileUtils.IsIgnoredPart(partHit)) continue; // Ignore ignored parts.
+                                    if (partHit.vessel == vessel || partHit.vessel == SourceVessel) continue; // Ignore source vessel
+                                    if (partHit.IsMissile() && partHit.GetComponent<MissileBase>().SourceVessel == SourceVessel) continue; // Ignore other missiles fired by same vessel
+                                    if (partHit.vessel.vesselType == VesselType.Debris) continue; // Ignore debris
+
+                                    Vector3 offset = collider.ClosestPointOnBounds(fuzePoint) - fuzePoint; // Nearest point of the part's box, as the sphere test measured to its surface.
+                                    Vector3 closing = (Vector3)partHit.vessel.Velocity() - missileVel;
+                                    float closingSqr = closing.sqrMagnitude;
+                                    float time = closingSqr > 1e-6f ? Mathf.Max(0f, -Vector3.Dot(offset, closing) / closingSqr) : 0f;
+                                    float missSqr = (offset + time * closing).sqrMagnitude;
+                                    if (missSqr < bestMissSqr) { bestMissSqr = missSqr; bestTime = time; bestPart = partHit; found = true; }
+                                    if (fragments)
                                     {
-                                        Part partHit = hitsEnu.Current.GetComponentInParent<Part>();
-
-                                        if (partHit == null) continue;
-                                        if (ProjectileUtils.IsIgnoredPart(partHit)) continue; // Ignore ignored parts.
-                                        if (partHit.vessel == vessel || partHit.vessel == SourceVessel) continue; // Ignore source vessel
-                                        if (partHit.IsMissile() && partHit.GetComponent<MissileBase>().SourceVessel == SourceVessel) continue; // Ignore other missiles fired by same vessel
-                                        if (partHit.vessel.vesselType == VesselType.Debris) continue; // Ignore debris
-
-                                        if (BDArmorySettings.DEBUG_MISSILES) Debug.Log("[BDArmory.MissileBase]: Missile proximity sphere hit | Distance overlap = " + optimalDistance + "| Part name = " + partHit.name);
-
-                                        //We found a hit a different vessel than ours
-                                        if (DetonateAtMinimumDistance)
+                                        if (missSqr <= fragmentReachSqr)
                                         {
-                                            var distanceSqr = (partHit.transform.position - vessel.CoM).sqrMagnitude;
-                                            var predictedDistanceSqr = (AIUtils.PredictPosition(partHit.transform.position, partHit.vessel.Velocity(), partHit.vessel.acceleration, Time.deltaTime) - AIUtils.PredictPosition(vessel, Time.deltaTime)).sqrMagnitude;
-
-                                            //float missileDistFrame = Time.fixedDeltaTime * (float)vessel.srfSpeed; vessel.Velocity() * Time.fixedDeltaTime
-
-                                            if (distanceSqr > predictedDistanceSqr && distanceSqr > relativeSpeed * relativeSpeed) // If we're closing and not going to hit within the next update, then wait.
-                                                return;
+                                            float inBelt = BeltTime(offset, closing, missileAxis, beltCos, frame, time);
+                                            if (inBelt < entryTime) { entryTime = inBelt; entryPart = partHit; }
                                         }
-                                        DetonationDistanceState = DetonationDistanceStates.Detonate;
-                                        return;
                                     }
-                                    catch (Exception e)
+                                    else if (!DetonateAtMinimumDistance && missSqr <= fuzeRangeSqr)
                                     {
-                                        // ignored
-                                        Debug.LogWarning("[BDArmory.MissileBase]: Exception thrown in CheckDetonatationState: " + e.Message + "\n" + e.StackTrace);
+                                        // First moment within fuze range: |offset + t closing| = DetonationDistance on the way in.
+                                        float startSqr = offset.sqrMagnitude, enter = 0f;
+                                        if (startSqr > fuzeRangeSqr && closingSqr > 1e-6f)
+                                        {
+                                            float half = Vector3.Dot(offset, closing);
+                                            enter = (-half - Mathf.Sqrt(Mathf.Max(0f, half * half - closingSqr * (startSqr - fuzeRangeSqr)))) / closingSqr;
+                                        }
+                                        if (enter < entryTime) { entryTime = Mathf.Max(0f, enter); entryPart = partHit; }
                                     }
                                 }
+                                catch (Exception e)
+                                {
+                                    // ignored
+                                    Debug.LogWarning("[BDArmory.MissileBase]: Exception thrown in CheckDetonatationState: " + e.Message + "\n" + e.StackTrace);
+                                }
+                            }
+                            float fireTime = -1f;
+                            if (entryTime <= frame) fireTime = entryTime; // Comes within fuze range this frame.
+                            else if (found && bestTime <= frame && entryPart == null) fireTime = bestTime; // Closest now, outside fuze range (or set to fire at minimum distance).
+                            if (fireTime >= 0f)
+                            {
+                                if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: Proximity fuze: {(fireTime == entryTime ? $"{(fragments ? "belt on" : $"entered {DetonationDistance:F1}m of")} {entryPart.name}" : $"closest approach {Mathf.Sqrt(bestMissSqr):F1}m to {bestPart.name}")} in {fireTime:F3}s (search sphere {optimalDistance:F0}m)");
+                                if (fireTime > 0f) vessel.SetPosition(vessel.transform.position + fireTime * missileWorldVelocity);
+                                DetonationDistanceState = DetonationDistanceStates.Detonate;
+                                return;
                             }
                         }
                         break;
@@ -2318,6 +2409,27 @@ namespace BDArmory.Weapons.Missiles
             {
                 Debug.Log($"[BDArmory.MissileBase]: DetonationDistanceState = : {DetonationDistanceState}");
             }
+        }
+
+        /// <summary>
+        /// First time within this frame that a part at offset, moving at closing relative to the missile, lies at least as far off the
+        /// missile's nose as the fragment belt's centre (cos ≤ beltCos). If it passes closest this frame without getting there, that
+        /// moment; otherwise MaxValue (not yet).
+        /// </summary>
+        static float BeltTime(Vector3 offset, Vector3 closing, Vector3 axis, float beltCos, float frame, float closest)
+        {
+            const int samples = 5;
+            float previousTime = 0f, previousCos = Vector3.Dot(offset, axis) / Mathf.Max(offset.magnitude, 1e-3f);
+            if (previousCos <= beltCos) return 0f;
+            for (int s = 1; s <= samples; ++s)
+            {
+                float t = s * frame / samples;
+                Vector3 r = offset + t * closing;
+                float c = Vector3.Dot(r, axis) / Mathf.Max(r.magnitude, 1e-3f);
+                if (c <= beltCos) return Mathf.Lerp(previousTime, t, (previousCos - beltCos) / Mathf.Max(previousCos - c, 1e-6f));
+                previousTime = t; previousCos = c;
+            }
+            return closest <= frame ? closest : float.MaxValue;
         }
 
         protected void SetInitialDetonationDistance()

@@ -750,7 +750,7 @@ namespace BDArmory.Control
                                                         aimingMode = AimingMode.Direct;
                                                         targetDirection = (MissileGuidance.GetAirToAirFireSolution(torpedo, targetVessel) - vessel.CoM).ProjectOnPlanePreNormalized(upDir);
                                                     }
-                                                    if (weaponManager.firedMissiles >= weaponManager.maxMissilesOnTarget)
+                                                    if (weaponManager.firedMissiles >= weaponManager.MissilesOnTargetLimit)
                                                     {
                                                         targetVelocity = MaxSpeed; //torps away, get out of there
                                                         orderedToExtend = true;

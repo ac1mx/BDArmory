@@ -173,6 +173,7 @@ namespace BDAStealth
                     Toggle(ref Settings.HomeOnJam, "Seekers home on noise jammers", "+jammerStrength/100 m² to missile seeker lock.");
                     Toggle(ref Settings.JamDeniesRange, "Noise jamming denies range", "Strobe on radar and no missile datalink until burn-through.");
                     Toggle(ref Settings.SkinStacking, "Coatings stack with hull material", "Stock: any armour replaces the hull's radar factor.");
+                    Toggle(ref Settings.BattleDamage, "Damage and open bays cost stealth", "Lost hitpoints wear coatings and stealth parts; open bays expose their missiles.");
                     Toggle(ref Settings.NoAssuredLock, "No guaranteed-lock zones", "41 radar/seeker configs lock anything inside 2–20 km, ECM included.");
                     bool floor = Settings.CmFloor > 0f;
                     Toggle(ref floor, "No countermeasure-immune missiles", "Flare/chaff effectiveness at least 15%.");
@@ -256,7 +257,7 @@ namespace BDAStealth
                 Vessel v = FlightGlobals.ActiveVessel;
                 TargetInfo ti = v != null ? v.gameObject.GetComponent<TargetInfo>() : null;
                 if (ti == null || ti.radarBaseSignature < 0f) { source = "Not measured yet: happens the first time any radar scans this craft."; return false; }
-                t = Target.Plain(ti.radarBaseSignature);
+                t = Target.Plain(ti.radarBaseSignature * Patches.Exposure(v));
                 t.Coating = Patches.Coating(v);
                 VesselECMJInfo info = v.gameObject.GetComponent<VesselECMJInfo>();
                 if (info != null) { t.Jam = info.jammerStrength; t.LockBreak = info.lockBreakStrength; }

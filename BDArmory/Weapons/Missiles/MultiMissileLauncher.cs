@@ -883,7 +883,12 @@ namespace BDArmory.Weapons.Missiles
                 Team = BDTeam.Get("Neutral");
             }
 
-            //else Debug.Log($"[BDArmory.MultiMissileLauncherDebug]: weaponmanager null!"); 
+            //else Debug.Log($"[BDArmory.MultiMissileLauncherDebug]: weaponmanager null!");
+            // A launcher of separate missiles at one target sends as many as the weapon manager's salvo decision still wants (at most its
+            // salvo size); cluster submunitions and salvos spread over several targets keep the designed size.
+            int salvo = (int)salvoSize;
+            if (FiredByWM != null && FiredByWM.salvoDecisions && !isClusterMissile && !isLaunchedClusterMissile && targetsAssigned.Count <= 1)
+                salvo = Mathf.Clamp(FiredByWM.MissilesStillWanted(), 1, salvo);
             yield return SetDeployed(true);
             if (missileSpawner == null)
             {
@@ -901,7 +906,7 @@ namespace BDArmory.Weapons.Missiles
                     salvoLaunching = false;
                     yield break;
                 } // Died while waiting.
-                if (launchesThisSalvo >= (int)salvoSize) //catch if launcher is trying to launch more missiles than it has
+                if (launchesThisSalvo >= salvo) //catch if launcher is trying to launch more missiles than it has
                 {
                     //if (BDArmorySettings.DEBUG_MISSILES) Debug.Log("[BDArmory.MultiMissileLauncher]: oops! firing more missiles than tubes or ammo");
                     break;

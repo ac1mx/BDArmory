@@ -644,8 +644,9 @@ namespace BDArmory.Radar
         public static TargetInfo RenderVesselRadarSnapshot(Vessel v, Transform t, TargetInfo ti = null, bool inEditorZoom = false)
         {
             BDAStealth.Patches.RenderPrefix(v);
-            try { return RenderVesselRadarSnapshotStock(v, t, ti, inEditorZoom); }
-            finally { BDAStealth.Patches.RenderFinalizer(); }
+            TargetInfo result = null;
+            try { return result = RenderVesselRadarSnapshotStock(v, t, ti, inEditorZoom); }
+            finally { BDAStealth.Patches.RenderFinalizer(v, result); }
         }
 
         static TargetInfo RenderVesselRadarSnapshotStock(Vessel v, Transform t, TargetInfo ti, bool inEditorZoom)

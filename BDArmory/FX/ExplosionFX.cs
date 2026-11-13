@@ -59,6 +59,136 @@ namespace BDArmory.FX
         Dictionary<string, int> totalPartsHit = [];
         Dictionary<string, float> totalDamageApplied = [];
 
+        // Missile damage record (with the pilot AI's metrics log): what each detonation did to each part it reached, logged once its blast events are done.
+        static readonly bool missileDamageRecord = Control.BDModulePilotAI.steeringMetricsEnabled;
+        readonly Dictionary<Part, float> missileDamageByPart = [];
+        readonly Dictionary<Part, float> missileBlockedParts = []; // In range, but the parts in the way absorbed the whole blast (distance).
+        bool missileDamageLogged;
+        void NoteMissileDamage(Part part, float damage)
+        {
+            if (!missileDamageRecord || ExplosionSource != ExplosionSourceType.Missile || part == null || damage <= 0f) return;
+            missileDamageByPart[part] = missileDamageByPart.GetValueOrDefault(part) + damage;
+        }
+        void NoteMissileBlocked(Part part, float distance)
+        {
+            if (!missileDamageRecord || ExplosionSource != ExplosionSourceType.Missile || part == null) return;
+            missileBlockedParts[part] = distance;
+        }
+
+        #region Warhead fragments
+        // A standard missile warhead's casing breaks into fast fragments thrown out in a belt around the missile's axis: blast-fragmentation
+        // warheads bring aircraft down with these rather than with blast pressure, which BDArmory's armour model mostly stops at a few metres.
+        // Each fragment ray carries a share of the casing (about as heavy as the charge), leaves at the Gurney speed added to the missile's own
+        // velocity and goes through the parts on its line, losing speed in each, with the penetration, kinetic damage and battle damage
+        // effects of a gun round. The number of fragments striking a craft falls with the square of the miss distance.
+        // A fragment is a steel chunk about as long as it is wide: its calibre (mm) follows from its mass.
+        internal const float fragmentsPerCubeRootKg = 60f, fragmentCasingRatio = 0.8f, fragmentSpeed = 1900f, fragmentBeltHalfAngle = 30f, steelDensity = 7.85f; // g/cm³
+        static RaycastHit[] fragmentHits;
+        static readonly HashSet<Part> fragmentPartsHit = new HashSet<Part>();
+        int fragmentHitCount;
+
+        void FireFragments()
+        {
+            if (ExplosionSource != ExplosionSourceType.Missile || warheadType != WarheadTypes.Standard || !BDArmorySettings.MISSILE_FRAGMENTS || BDArmorySettings.PAINTBALL_MODE || Power <= 0f) return;
+            if (fragmentHits == null) fragmentHits = new RaycastHit[64];
+            int count = Mathf.Clamp(Mathf.RoundToInt(fragmentsPerCubeRootKg * (float)tntMassCubeRoot), 20, 300);
+            float mass = fragmentCasingRatio * Power / count; // kg
+            float caliber = 10f * Mathf.Pow(1000f * mass / steelDensity, 1f / 3f); // mm
+            Vector3 axis = Velocity.sqrMagnitude > 2500f ? Velocity.normalized : ExplosivePart != null ? ExplosivePart.partTransform.forward : VectorUtils.GetUpDirection(Position);
+            Vector3 u = Vector3.Cross(axis, Mathf.Abs(Vector3.Dot(axis, Vector3.up)) < 0.9f ? Vector3.up : Vector3.right).normalized;
+            Vector3 w = Vector3.Cross(axis, u);
+            float sinBelt = Mathf.Sin(fragmentBeltHalfAngle * Mathf.Deg2Rad);
+            float range = 2f * Range;
+            Vessel ownVessel = ExplosivePart != null ? ExplosivePart.vessel : null;
+            for (int i = 0; i < count; ++i)
+            {
+                float s = UnityEngine.Random.Range(-sinBelt, sinBelt); // Uniform over the belt's area.
+                float c = Mathf.Sqrt(1f - s * s), azimuth = UnityEngine.Random.Range(0f, 2f * Mathf.PI);
+                Vector3 velocity = Velocity + fragmentSpeed * (c * (Mathf.Cos(azimuth) * u + Mathf.Sin(azimuth) * w) + s * axis);
+                float speed = velocity.magnitude;
+                if (speed < 1f) continue;
+                Vector3 direction = velocity / speed;
+                var ray = new Ray(Position, direction);
+                int hitCount = Physics.RaycastNonAlloc(ray, fragmentHits, range, explosionLayerMask);
+                if (hitCount == fragmentHits.Length) { fragmentHits = Physics.RaycastAll(ray, range, explosionLayerMask); hitCount = fragmentHits.Length; }
+                if (hitCount == 0) continue;
+                Array.Sort(fragmentHits, 0, hitCount, RaycastHitComparer.raycastHitComparer);
+                fragmentPartsHit.Clear();
+                for (int h = 0; h < hitCount; ++h)
+                {
+                    var hit = fragmentHits[h];
+                    if (hit.collider == null) continue;
+                    if (FlightGlobals.currentMainBody != null && hit.collider.gameObject == FlightGlobals.currentMainBody.gameObject) break; // The ground.
+                    Part part = hit.collider.GetComponentInParent<Part>();
+                    if (part == null) break; // Buildings and scenery stop it.
+                    if (part == ExplosivePart || (ownVessel != null && part.vessel == ownVessel) || part.vessel == null || ProjectileUtils.IsIgnoredPart(part) || !fragmentPartsHit.Add(part)) continue;
+                    Vector3 partVelocity = part.vessel.Velocity();
+                    float relativeSpeed = (velocity - partVelocity).magnitude;
+                    float remaining = FragmentHit(part, hit, mass, caliber, direction, relativeSpeed);
+                    if (remaining < 100f) break; // Stopped, or too slow to matter.
+                    velocity = partVelocity + remaining * direction;
+                }
+            }
+        }
+
+        /// <summary>One fragment striking a part: penetration through its armour along the path, damage if it gets through. Returns the speed it leaves with (0 if stopped).</summary>
+        float FragmentHit(Part part, RaycastHit hit, float mass, float caliber, Vector3 direction, float speed)
+        {
+            var armor = part.FindModuleImplementing<HitpointTracker>();
+            float thickness = ProjectileUtils.CalculateThickness(part, Mathf.Max(Mathf.Abs(Vector3.Dot(direction, hit.normal)), 0.05f)); // mm along the path
+            // The Tate-based overload, picked by the named arguments: the 4-float overload takes mass and speed the other way round.
+            float penetration = armor != null
+                ? ProjectileUtils.CalculatePenetration(caliber, speed, mass, 1f, armor.Strength, armor.vFactor, armor.muParam1, armor.muParam2, armor.muParam3, sabot: false, length: caliber)
+                : ProjectileUtils.CalculatePenetration(caliber, speed, mass, 1f, sabot: false, length: caliber);
+            float penetrationFactor = ProjectileUtils.CalculateArmorPenetration(part, penetration, thickness);
+            if (penetrationFactor < 1f) return 0f; // Stopped by the skin.
+            ++fragmentHitCount;
+            float damage = part.AddBallisticDamage(mass, caliber, 1f, penetrationFactor, 1f, speed, ExplosionSource, true);
+            string vesselName = part.vessel.GetName();
+            totalDamageApplied[vesselName] = totalDamageApplied.GetValueOrDefault(vesselName) + damage;
+            NoteMissileDamage(part, damage);
+            if (BDArmorySettings.BATTLEDAMAGE) BattleDamageHandler.CheckDamageFX(part, caliber, penetrationFactor, false, false, SourceVesselName, hit);
+            if (damage > 0f) ProjectileUtils.ApplyScore(part, SourceVesselName, 0, damage, null, ExplosionSource);
+            return speed * Mathf.Sqrt(Mathf.Clamp01(1f - 1f / penetrationFactor)); // What's left after the energy spent getting through.
+        }
+        #endregion
+        void LogMissileDamage()
+        {
+            missileDamageLogged = true;
+            if (missileDamageByPart.Count == 0 && missileBlockedParts.Count == 0) return;
+            var vessels = missileDamageByPart.Keys.Concat(missileBlockedParts.Keys).Where(p => p != null && p.vessel != null).Select(p => p.vessel).Distinct().ToList();
+            foreach (var vessel in vessels)
+            {
+                var group = missileDamageByPart.Where(kvp => kvp.Key != null && kvp.Key.vessel == vessel).ToList();
+                var blocked = missileBlockedParts.Where(kvp => kvp.Key != null && kvp.Key.vessel == vessel && !missileDamageByPart.ContainsKey(kvp.Key))
+                    .Select(kvp => (kvp.Key, kvp.Value, hp: kvp.Key.FindModuleImplementing<HitpointTracker>())).OrderByDescending(b => b.hp != null ? b.hp.GetMaxHitpoints() : 0f).ToList();
+                string blockedList = string.Join(",", blocked.Take(4).Select(b => $"{b.Key.partInfo?.name}@{b.Value:0}m"));
+                float damage = 0f; int destroyed = 0;
+                var worst = new List<string>();
+                foreach (var kvp in group.OrderByDescending(kvp => kvp.Value))
+                {
+                    damage += kvp.Value;
+                    var hp = kvp.Key.FindModuleImplementing<HitpointTracker>();
+                    float max = hp != null ? hp.GetMaxHitpoints() : 0f;
+                    bool killed = hp != null && hp.Hitpoints <= 0f;
+                    if (killed) ++destroyed;
+                    if (worst.Count < 4) worst.Add($"{kvp.Key.partInfo?.name}:{kvp.Value:0}/{max:0}{(killed ? "!" : "")}");
+                }
+                float current = 0f, total = 0f;
+                foreach (var hp in VesselModuleRegistry.GetModules<HitpointTracker>(vessel))
+                {
+                    if (hp == null || hp.part == null) continue;
+                    current += Mathf.Max(hp.Hitpoints, 0f); total += hp.GetMaxHitpoints();
+                }
+                Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "[BDArmory.ExplosionFX]: MissileDamage weapon={0} from={1} at={2} range={3:F0} tntCubeRoot={4:F2} damage={5:F0} damaged={6} destroyed={7} blocked={8} vesselHP={9:F2} vesselParts={10} worst={11} blockedParts={12} fragmentHits={13}",
+                    SourceWeaponName?.Replace(' ', '_'), SourceVesselName?.Replace(' ', '_'), vessel.vesselName.Replace(' ', '_'), Range, tntMassCubeRoot,
+                    damage, group.Count, destroyed, blocked.Count, total > 0f ? current / total : 0f, vessel.parts.Count, string.Join(",", worst), blockedList, fragmentHitCount));
+            }
+            missileDamageByPart.Clear();
+            missileBlockedParts.Clear();
+        }
+
         private bool disabled = true;
 
         float blastRange;
@@ -132,9 +262,14 @@ namespace BDArmory.FX
             blastRange = warheadType == WarheadTypes.Standard ? Range * 2 : Range; //to properly account for shrapnel hits when compiling list of hit parts from the spherecast
             totalPartsHit.Clear();
             totalDamageApplied.Clear();
+            missileDamageByPart.Clear();
+            missileBlockedParts.Clear();
+            missileDamageLogged = false;
+            fragmentHitCount = 0;
             if (!isFX)
             {
                 CalculateBlastEvents();
+                FireFragments();
             }
             pEmitters = gameObject.GetComponentsInChildren<KSPParticleEmitter>();
             foreach (var pe in pEmitters)
@@ -815,6 +950,7 @@ namespace BDArmory.FX
                 }
             }
 
+            if (missileDamageRecord && !missileDamageLogged && !isFX && explosionEvents.Count == 0 && ExplosionSource == ExplosionSourceType.Missile) LogMissileDamage();
             // Do a separate check here for events being empty so we can report asap.
             if (BDArmorySettings.REPORT_DAMAGE_NOT_PARTS_HIT && isReportingWeapon && explosionEvents.Count == 0 && totalDamageApplied.Count > 0)
             {
@@ -1311,12 +1447,15 @@ namespace BDArmory.FX
                                         },
                                         ExplosionSource, true);
                                     totalDamageApplied[vesselHit] += damage;
+                                    NoteMissileDamage(part, damage);
 
                                     if (warheadType != WarheadTypes.Kinetic)
                                     {
                                         if (damageWithoutIntermediateParts > 0)
                                         {
-                                            damage += part.AddExplosiveDamage(shapedEffect ? (0.2f * blastInfo.Damage + 0.8f * damageWithoutIntermediateParts) : blastInfo.Damage, Caliber, ExplosionSource, dmgMult);
+                                            float blast = part.AddExplosiveDamage(shapedEffect ? (0.2f * blastInfo.Damage + 0.8f * damageWithoutIntermediateParts) : blastInfo.Damage, Caliber, ExplosionSource, dmgMult);
+                                            NoteMissileDamage(part, blast);
+                                            damage += blast;
                                             totalDamageApplied[vesselHit] += damage;
                                         }
 
@@ -1339,6 +1478,7 @@ namespace BDArmory.FX
                                     {
                                         damage = part.AddExplosiveDamage(blastInfo.Damage, Caliber, ExplosionSource, dmgMult);
                                         totalDamageApplied[vesselHit] += damage;
+                                        NoteMissileDamage(part, damage);
                                         if (part == projectileHitPart && ProjectileUtils.IsArmorPart(part)) //deal armor damage to armor panel, since we didn't do that earlier
                                         {
                                             ProjectileUtils.CalculateExplosiveArmorDamage(part, blastInfo.TotalPressure, realDistance, SourceVesselName, eventToExecute.Hit, ExplosionSource, Range, minPressure);
@@ -1360,9 +1500,10 @@ namespace BDArmory.FX
                             }
                         }
                     }
-                    else if (BDArmorySettings.DEBUG_DAMAGE)
+                    else
                     {
-                        Debug.Log($"[BDArmory.ExplosionFX]: Part {part.name} at distance {realDistance}m took no damage due to parts with {cumulativeHPOfIntermediateParts} HP and {cumulativeArmorOfIntermediateParts} Armor in the way.");
+                        NoteMissileBlocked(part, realDistance);
+                        if (BDArmorySettings.DEBUG_DAMAGE) Debug.Log($"[BDArmory.ExplosionFX]: Part {part.name} at distance {realDistance}m took no damage due to parts with {cumulativeHPOfIntermediateParts} HP and {cumulativeArmorOfIntermediateParts} Armor in the way.");
                     }
                 }
                 else

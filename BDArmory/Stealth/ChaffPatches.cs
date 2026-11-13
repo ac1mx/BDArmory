@@ -17,7 +17,8 @@ namespace BDAStealth
     ///  - a radar missile (on its own seeker, riding the launcher's lock, or on inertial mid-course updates) steers for the
     ///    chaff bloom for a few seconds, then returns to the target if it still can;
     ///  - an aircraft or ground radar holding a lock drops it and has to lock again.
-    /// Chaff works best while beaming and for small radar cross-sections, measured at the aspect the sensor sees.
+    /// Chaff works in the notch (the target beaming, so that chaff at rest shares its doppler) and for small radar cross-sections,
+    /// measured at the aspect the sensor sees; outside the seeker's velocity gate it does little.
     /// </summary>
     internal static class ChaffPatches
     {
@@ -79,10 +80,28 @@ namespace BDAStealth
             Vector3 los = (Vector3)tv.CoM - sensor;
             range = los.magnitude;
             Vector3 vel = tv.Velocity();
-            // Doppler separation between the target and its chaff: none while beaming or standing still.
-            beam = 1f - Mathf.Clamp01(Mathf.Abs(Vector3.Dot(vel, los.normalized)) / Mathf.Max(vel.magnitude, 1f));
+            // Doppler overlap between the target and its chaff, which stops dead in the air: only while the target's speed along the
+            // line of sight is small (beaming, or nearly standing still) does the bloom fall inside the seeker's velocity gate.
+            beam = StealthMath.DopplerOverlap(Mathf.Abs(Vector3.Dot(vel, los.normalized)));
             rcs = SkinRcs(ti, sensor, range);
             return StealthMath.ChaffSeduction(Settings.ChaffChance, effectivity, Settings.CmFloor, beam, rcs);
+        }
+
+        /// <summary>
+        /// Chance that one bundle tv dispenses now seduces the radar missile m, at the current geometry, and what it would be beaming (inside
+        /// the seeker's doppler gate); seduced when m is already following chaff. Negative when chaff seduction is off.
+        /// </summary>
+        internal static float BundleChance(MissileBase m, Vessel tv, out float beamingChance, out bool seduced)
+        {
+            seduced = m != null && tracks.TryGetValue(m, out Track t) && t.Target == tv && Time.time < t.Until;
+            beamingChance = -1f;
+            if (!Settings.Enabled || !Settings.ChaffSeduction || m == null || tv == null) return -1f;
+            float eff = m.chaffEffectivity;
+            ModuleRadar radar = !m.ActiveRadar && m.radarTarget.exists ? m.radarTarget.lockedByRadar : null;
+            if (radar != null) eff *= radar.radarChaffClutterFactor;
+            float p = Chance(tv, m.radarTarget.exists ? m.radarTarget.targetInfo : tv.gameObject.GetComponent<TargetInfo>(), m.transform.position, eff, out _, out float rcs, out _);
+            beamingChance = StealthMath.ChaffSeduction(Settings.ChaffChance, eff, Settings.CmFloor, 1f, rcs);
+            return p;
         }
 
         // ---- missiles ----
@@ -143,7 +162,7 @@ namespace BDAStealth
                 t.From = b.Time; t.Geo = b.Geo; t.Velocity = b.Velocity; t.Body = b.Body;
                 t.Until = now + Random.Range(1.5f, 3.5f);
                 Seductions++;
-                Debug.Log($"[BDAStealth] Chaff: {m.shortName} seduced off {tv.vesselName} for {t.Until - now:0.0} s (chance {100f * p:0}%, beam {beam:0.00}, RCS {rcs:0.##} m², range {range:0} m)");
+                Debug.Log($"[BDAStealth] Chaff: {m.shortName} seduced off {tv.vesselName} for {t.Until - now:0.0} s (chance {100f * p:0}%, doppler overlap {beam:0.00}, RCS {rcs:0.##} m², range {range:0} m)");
                 if (Notify.Involves(m.SourceVessel, tv)) Notify.Post($"{m.shortName} · chaff · {tv.vesselName}");
                 return;
             }
@@ -175,7 +194,7 @@ namespace BDAStealth
                 for (int k = 0; k < bundles && !broken; k++) broken = Random.value < p;
                 if (!broken) continue;
                 LockBreaks++;
-                Debug.Log($"[BDAStealth] Chaff: {radar.vessel.vesselName} radar lock on {tv.vesselName} broken (chance {100f * p:0}%, beam {beam:0.00}, RCS {rcs:0.##} m², range {range:0} m)");
+                Debug.Log($"[BDAStealth] Chaff: {radar.vessel.vesselName} radar lock on {tv.vesselName} broken (chance {100f * p:0}%, doppler overlap {beam:0.00}, RCS {rcs:0.##} m², range {range:0} m)");
                 if (Notify.Involves(radar.vessel, tv)) Notify.Post($"LOCK LOST · chaff · {tv.vesselName}");
                 radar.UnlockTargetAt(i);
                 return;   // the lock list changed; the rest are checked next frame

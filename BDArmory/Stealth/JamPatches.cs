@@ -147,7 +147,7 @@ namespace BDAStealth
                 if (__instance.vessel == null || !__instance.vessel.isActiveVessel) return;
                 TargetInfo ti = targetVessel.gameObject.GetComponent<TargetInfo>();
                 if (ti == null || !Patches.TryEcm(ti, out EcmData e) || e.LockBreak <= 0f) return;
-                Target t = Target.Plain(ti.radarBaseSignature);
+                Target t = Target.Plain(ti.radarBaseSignature * Patches.Exposure(targetVessel));
                 t.Coating = Patches.Coating(targetVessel); t.Parts = e.PartsCombined(); t.Jam = e.Jam; t.LockBreak = e.LockBreak;
                 float burnThrough = Analysis.Evaluate(Sensors.Of(__instance), t).LockEcm;
                 if (Vector3.Distance(targetVessel.CoM, __instance.vessel.CoM) * 0.001f <= burnThrough) return;   // inside burn-through: ECM is not why it failed

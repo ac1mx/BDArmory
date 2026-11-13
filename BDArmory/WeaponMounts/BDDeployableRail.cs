@@ -24,6 +24,10 @@ namespace BDArmory.WeaponMounts
         public string deployTransformName = "deployTransform";
 
         public bool IsDeployed => (deployed && !deploying) || (!deployed && deploying); // Deploying or being deployed. !IsDeployed = retracted or retracting.
+        /// <summary>How far out the rail is: 0 stowed, 1 deployed.</summary>
+        public float DeployFraction => deployState != null ? Mathf.Clamp01(deployState.normalizedTime) : deployed ? 1f : 0f;
+        /// <summary>Seconds until the rail can fire if it deploys from where it is now.</summary>
+        public float TimeToReady => readyToFire ? 0f : (1f - DeployFraction) * (deployState != null ? deployState.length : 1f) + rotationDelay;
         bool deployed = false;
         bool deploying = false;
         [KSPField] public float rotationDelay = 0.15f;

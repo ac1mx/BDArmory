@@ -567,13 +567,13 @@ UI_Toggle(enabledText = "#LOC_BDArmory_true", disabledText = "#LOC_BDArmory_fals
                                                 targetAltitude = CombatAltitude < 100 ? CombatAltitude : 100; //100 vs 200 since helis are going to be going much slower, don't want torps bellyflopping; if we ever do sonobuoys or similar this should probably really be something like 15m, not 100
                                                 if (distance < torpedo.engageRangeMax + (float)(vessel.srf_velocity - targetVessel.srf_velocity).magnitude)
                                                 {
-                                                    if (weaponManager.firedMissiles < weaponManager.maxMissilesOnTarget)
+                                                    if (weaponManager.firedMissiles < weaponManager.MissilesOnTargetLimit)
                                                         targetVelocity = CombatSpeed; //slow to drop speed
 
                                                     aimingMode = AimingMode.Yaw;
                                                     targetDirection = (MissileGuidance.GetAirToAirFireSolution(torpedo, targetVessel) - vessel.CoM).ProjectOnPlanePreNormalized(upDir);
                                                 }
-                                                if (weaponManager.firedMissiles >= weaponManager.maxMissilesOnTarget)
+                                                if (weaponManager.firedMissiles >= weaponManager.MissilesOnTargetLimit)
                                                 {
                                                     targetAltitude = bombingAltitude;
                                                     targetVelocity = MaxSpeed; //torps away, get out of there

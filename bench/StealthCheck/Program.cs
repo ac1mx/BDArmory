@@ -180,8 +180,10 @@ static class Program
             float beam1 = StealthMath.ChaffSeduction(0.3f, 1f, 0.15f, 1f, 1f), head1 = StealthMath.ChaffSeduction(0.3f, 1f, 0.15f, 0f, 1f);
             float beam10 = StealthMath.ChaffSeduction(0.3f, 1f, 0.15f, 1f, 10f), beam01 = StealthMath.ChaffSeduction(0.3f, 1f, 0.15f, 1f, 0.1f);
             float immune = StealthMath.ChaffSeduction(0.3f, 0f, 0.15f, 1f, 1f);
-            Console.WriteLine($"   chaff seduction @0.3 per bundle: 1 m² beaming {beam1:P1}, head-on {head1:P1}; 10 m² beaming {beam10:P1}; 0.1 m² beaming {beam01:P1}; chaff-immune missile {immune:P1}");
-            Check(Math.Abs(beam1 - 0.25f) < 1e-3f && Math.Abs(head1 - 0.05f) < 1e-3f, "chaff works 5× better beaming than head-on (1 m²: 25% vs 5% per bundle)");
+            float crank1 = StealthMath.ChaffSeduction(0.3f, 1f, 0.15f, StealthMath.DopplerOverlap(300f * MathF.Sin(MathF.PI / 4f)), 1f); // 300 m/s, 45° off the line of sight
+            float notch1 = StealthMath.ChaffSeduction(0.3f, 1f, 0.15f, StealthMath.DopplerOverlap(300f * MathF.Sin(5f * MathF.PI / 180f)), 1f); // within 5° of the beam
+            Console.WriteLine($"   chaff seduction @0.3 per bundle: 1 m² beaming {beam1:P1}, 5° off the beam {notch1:P1}, cranking 45° {crank1:P1}, head-on {head1:P1}; 10 m² beaming {beam10:P1}; 0.1 m² beaming {beam01:P1}; chaff-immune missile {immune:P1}");
+            Check(Math.Abs(beam1 - 0.25f) < 1e-3f && head1 < 0.01f && crank1 < 0.01f && notch1 > 0.15f, "chaff works in the notch (1 m²: 25% beaming, >15% within 5°) and hardly at all outside the velocity gate (<1% cranking or head-on)");
             Check(beam01 > beam1 && beam1 > beam10 && beam10 > 0f && beam01 < 0.3f + 1e-6f, "chaff hides small targets better than large ones, never above the base chance");
             Check(immune > 0f && immune < beam1 && StealthMath.ChaffSeduction(0.3f, 0f, 0f, 1f, 1f) == 0f, "chaff-immune missiles are floored, not immune; 0 with the floor off");
         }
@@ -260,7 +262,7 @@ static class Program
 
             float beam1 = ChaffDefeat(0.2f, 1f, 1f, 1f), head1 = ChaffDefeat(0.2f, 1f, 0f, 1f), beam10 = ChaffDefeat(0.2f, 1f, 1f, 10f), beam01 = ChaffDefeat(0.2f, 1f, 1f, 0.1f);
             Console.WriteLine($"   radar missile vs AI chaff ({chaffTimes.Length} bundles, chance 20%):1 m² beaming {beam1:P0}, head-on {head1:P0}; 10 m² beaming {beam10:P0}; 0.1 m² beaming {beam01:P0}");
-            Check(beam1 > 0.35f && beam1 < 0.65f && head1 > 0.05f && head1 < 0.2f, "chaff + beaming defeats about half the radar missiles; chaff alone head-on under 20%");
+            Check(beam1 > 0.35f && beam1 < 0.65f && head1 < 0.03f, "chaff in the notch defeats about half the radar missiles; outside the velocity gate (head-on) under 3%");
             Check(beam10 < beam1 * 0.7f && beam01 > beam1, "chaff protects a 10 m² craft much less and a stealth craft more");
         }
 

@@ -3378,7 +3378,8 @@ namespace BDArmory.UI
                         BDArmorySettings.EXP_DMG_MOD_ROCKET = BDAMath.RoundToUnit(GUI.HorizontalSlider(SRightSliderRect(line), BDArmorySettings.EXP_DMG_MOD_ROCKET, 0f, 2f), 0.05f);
 
                         GUI.Label(SLeftSliderRect(++line), $"{StringUtils.Localize("#LOC_BDArmory_Settings_MissileExplosiveDamageMultiplier")}:  ({BDArmorySettings.EXP_DMG_MOD_MISSILE})", leftLabel);
-                        BDArmorySettings.EXP_DMG_MOD_MISSILE = BDAMath.RoundToUnit(GUI.HorizontalSlider(SRightSliderRect(line), BDArmorySettings.EXP_DMG_MOD_MISSILE, 0f, 10f), 0.25f);
+                        BDArmorySettings.EXP_DMG_MOD_MISSILE = BDAMath.RoundToUnit(GUI.HorizontalSlider(SRightSliderRect(line), BDArmorySettings.EXP_DMG_MOD_MISSILE, 0f, 50f), 0.25f); // Up to 50: drawing a narrower slider would clamp a larger saved value.
+                        BDArmorySettings.MISSILE_FRAGMENTS = GUI.Toggle(SLeftRect(++line), BDArmorySettings.MISSILE_FRAGMENTS, "Missile Warhead Fragments");
 
                         GUI.Label(SLeftSliderRect(++line), $"{StringUtils.Localize("#LOC_BDArmory_Settings_HEATExplosiveDamageMultiplier")}:  ({BDArmorySettings.EXP_DMG_MOD_HEAT})", leftLabel);
                         BDArmorySettings.EXP_DMG_MOD_HEAT = BDAMath.RoundToUnit(GUI.HorizontalSlider(SRightSliderRect(line), BDArmorySettings.EXP_DMG_MOD_HEAT, 0f, 10f), 0.25f);
@@ -4076,6 +4077,7 @@ namespace BDArmory.UI
                     {
                         BDArmorySettings.BD_PILOT_KILLS = GUI.Toggle(SLeftRect(++line, 1f), BDArmorySettings.BD_PILOT_KILLS, StringUtils.Localize("#LOC_BDArmory_Settings_BD_PilotKill"));//"Crew Fatalities"
                     }
+                    BDArmorySettings.BD_AIRFRAME_INTEGRITY = GUI.Toggle(SLeftRect(++line), BDArmorySettings.BD_AIRFRAME_INTEGRITY, "Airframe Integrity");
 
                     BDArmorySettings.BD_TANKS = GUI.Toggle(SLeftRect(++line), BDArmorySettings.BD_TANKS, StringUtils.Localize("#LOC_BDArmory_Settings_BD_Tanks"));//"FuelTank Damage"
                     if (BDArmorySettings.BD_TANKS && BDArmorySettings.ADVANCED_USER_SETTINGS)

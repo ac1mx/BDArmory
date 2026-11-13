@@ -15,7 +15,7 @@ namespace BDArmory.Control
     /// Air combat tactics of the pilot AI that sit on top of the basic engage/evade/extend behaviour.
     /// Everything here is switched by advancedTactics and stands down whenever the terrain, waypoint, ramming or auto-tuning logic is in charge.
     /// Stock settings are honoured rather than duplicated: canExtend (pump), maxAltitude (climb), each radar's Dynamic Radar option (radar silence),
-    /// maxMissilesOnTarget and the afterburner priority.
+    /// the weapon manager's salvo decisions (or its fixed maxMissilesOnTarget) and the afterburner priority.
     /// </summary>
     public partial class BDModulePilotAI
     {
@@ -65,7 +65,9 @@ namespace BDArmory.Control
                 return null;
             }
             if (OneCircleTurn(v, vectorToTarget, distanceToTarget, ref target)) return "One Circle";
-            bool settingUpLaunch = weaponManager.CurrentMissile != null && weaponManager.firedMissiles < weaponManager.maxMissilesOnTarget; // The nose is needed on the target.
+            bool settingUpLaunch = weaponManager.CurrentMissile != null && weaponManager.firedMissiles < weaponManager.MissilesOnTargetLimit; // The nose is needed on the target.
+            string planned = PlannedGeometry(weaponManager, v, vectorToTarget, distanceToTarget, settingUpLaunch, ref target);
+            if (planned != null) return planned;
             if (!settingUpLaunch)
             {
                 string support = CrankOrPump(weaponManager, v, vectorToTarget, distanceToTarget, ref target);
@@ -91,7 +93,10 @@ namespace BDArmory.Control
                     NoteTactic("Bracket");
                 }
                 else
-                    engagementSide = Vector3.Dot(Vector3.Cross(toTarget, vessel.Velocity().ProjectOnPlanePreNormalized(upDirection)), upDirection) >= 0 ? 1 : -1;
+                {
+                    engagementSide = SideAwayFromOtherThreats(toTarget); // Away from another bandit pointing at us, if there is one.
+                    if (engagementSide == 0) engagementSide = Vector3.Dot(Vector3.Cross(toTarget, vessel.Velocity().ProjectOnPlanePreNormalized(upDirection)), upDirection) >= 0 ? 1 : -1;
+                }
             }
             return Quaternion.AngleAxis(engagementSide * angle, upDirection) * toTarget;
         }
@@ -114,12 +119,18 @@ namespace BDArmory.Control
                 if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Pumping away from {v.vesselName} with {missilesAway} missiles on the way");
                 return "Pumping";
             }
-            float fov = weaponManager.vesselRadarData != null ? weaponManager.vesselRadarData.GetCrankFOV() : 120f;
-            float crankAngle = Mathf.Min(fov >= 360f ? 60f : Mathf.Clamp(fov / 2f - 5f, 5f, 60f), offAspectLimit);
+            float crankAngle = CrankAngle(weaponManager);
             target = vesselTransform.position + 1000f * OffsetDirection(vectorToTarget, crankAngle);
             { ++crankTicks; NoteTactic("Crank"); }
             if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Cranking {crankAngle:0}° {(engagementSide > 0 ? "right" : "left")} of {v.vesselName}");
             return "Cranking";
+        }
+
+        /// <summary>How far off the nose the target can be kept: the edge of the radar's view, within the radar cross-section's limit.</summary>
+        float CrankAngle(MissileFire weaponManager)
+        {
+            float fov = weaponManager != null && weaponManager.vesselRadarData != null ? weaponManager.vesselRadarData.GetCrankFOV() : 120f;
+            return Mathf.Min(fov >= 360f ? 60f : Mathf.Clamp(fov / 2f - 5f, 5f, 60f), offAspectLimit);
         }
 
         /// <summary>
@@ -154,11 +165,8 @@ namespace BDArmory.Control
                 if (Vector3.Dot(vectorToTarget, vesselTransform.up) > 0 || Vector3.Dot(velDir, v.srf_vel_direction) > -0.5f) return false; // Not yet passed, or not a head-on pass.
                 lastMergeTime = Time.time;
                 var weaponManager = WeaponManager;
-                if (weaponManager != null && !weaponManager.isFlaring && preemptiveFlareSalvos < maxPreemptiveFlareSalvos) // The pass is where a heat-seeker gets its tail shot.
-                {
+                if (weaponManager != null && (weaponManager.salvoDecisions || preemptiveFlareSalvos < maxPreemptiveFlareSalvos) && weaponManager.FirePreemptiveFlares()) // The pass is where a heat-seeker gets its tail shot.
                     ++preemptiveFlareSalvos;
-                    weaponManager.FireFlares();
-                }
                 if (vessel.srfSpeed > 0.85f * v.srfSpeed) return false; // No radius advantage: take the two-circle fight.
                 mergeTurnSide = Vector3.Dot(vectorToTarget, vesselTransform.right) >= 0 ? -1f : 1f; // Away from the side it passed on.
                 mergeTurnTimer = 0;
@@ -295,20 +303,77 @@ namespace BDArmory.Control
         public float ShotEstimate { get; private set; } = -1f;
         public float ShotThreshold { get; private set; }
 
+        // Patience: a shot that clears the threshold is still held while carrying on for shotWaitLead seconds would raise its chance by
+        // shotWaitGain, as long as nothing is coming at us and the opponent's own best shot at us is still poor. Otherwise the first shot
+        // is worth more than a better one later: it puts the opponent on the defensive.
+        const float shotWaitLead = 6f, shotWaitGain = 0.12f, shotWaitOpponentLimit = 0.2f;
+        const float shotDecisionInterval = 0.5f; // s: each decision flies the missile up to 8 times (~0.3 ms each in the bench).
+        public float OpponentShotEstimate { get; private set; } = -1f;
+        int missileShotsHeldForTiming;
+        Vessel shotDecisionTarget;
+        MissileBase shotDecisionMissile;
+        float shotDecisionTime = -1f;
+        bool shotDecision;
+
+        float ShotThresholdFor(int remaining) => Mathf.Clamp(shotThresholdLast - shotThresholdPerMissile * remaining, shotThresholdFloor, shotThresholdLast) + (pilotSkill <= 50f ? shotThresholdTrained : 0f);
+
         /// <summary>
-        /// Whether the selected missile is worth launching at the target now.
+        /// Whether the selected missile is worth launching at the target now (re-decided a few times a second: each estimate flies the missile).
         /// </summary>
         bool ShotWorthTaking(Vessel target)
         {
             var weaponManager = WeaponManager;
             var missile = weaponManager != null ? weaponManager.CurrentMissile : null;
             if (missile == null || target.LandedOrSplashed) { ShotEstimate = -1f; return true; }
+            if (target == shotDecisionTarget && missile == shotDecisionMissile && Time.time - shotDecisionTime < shotDecisionInterval) return shotDecision;
+            shotDecisionTarget = target; shotDecisionMissile = missile; shotDecisionTime = Time.time;
             int remaining = 0;
             foreach (var other in VesselModuleRegistry.GetModules<MissileBase>(vessel))
                 if (other != null && !other.HasFired) ++remaining;
-            ShotThreshold = Mathf.Clamp(shotThresholdLast - shotThresholdPerMissile * remaining, shotThresholdFloor, shotThresholdLast) + (pilotSkill <= 50f ? shotThresholdTrained : 0f);
-            ShotEstimate = ShotModel.Estimate(missile, vessel, target);
-            return ShotEstimate >= ShotThreshold;
+            ShotThreshold = ShotThresholdFor(remaining);
+            ShotEstimate = ShotModel.Estimate(missile, vessel, target, out var features);
+            shotDecision = ShotEstimate >= ShotThreshold;
+            if (shotDecision && !weaponManager.missileIsIncoming)
+            {
+                OpponentShotEstimate = BestShotAt(target, vessel);
+                bool unseen = UnseenByTarget(weaponManager, target);
+                bool patient = unseen || OpponentShotEstimate < shotWaitOpponentLimit && !OpponentShotSoon(weaponManager, target);
+                if (patient && ShotModel.EstimateLater(missile, vessel, target, shotWaitLead) >= ShotEstimate + (unseen ? unseenWaitGain : shotWaitGain))
+                {
+                    shotDecision = false;
+                    ++missileShotsHeldForTiming;
+                    if (unseen) ++planUnseenHolds;
+                }
+            }
+            if (!shotDecision && ForcingShotWanted(weaponManager, target, missile, features))
+            {
+                shotDecision = true;
+                forcingPendingUntil = Time.time + 3f;
+            }
+            if (!shotDecision && FreeShotWanted(weaponManager, target, missile, features))
+            {
+                shotDecision = true;
+                freeShotPendingUntil = Time.time + 3f;
+            }
+            return shotDecision;
+        }
+
+        /// <summary>The latest shot estimate if it was made for this target and missile in the last 2 s, else -1.</summary>
+        public float ShotEstimateFor(Vessel target, MissileBase missile) =>
+            target != null && target == shotDecisionTarget && missile == shotDecisionMissile && Time.time - shotDecisionTime < 2f ? ShotEstimate : -1f;
+
+        static readonly System.Collections.Generic.HashSet<string> shotTypesSeen = new System.Collections.Generic.HashSet<string>();
+        /// <summary>The best chance any of a craft's unfired air-to-air missiles would have against another, launched now (0 if none); one estimate per missile type.</summary>
+        static float BestShotAt(Vessel shooter, Vessel target)
+        {
+            float best = 0f;
+            shotTypesSeen.Clear();
+            foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(shooter))
+            {
+                if (missile == null || missile.HasFired || !missile.engageAir || missile.part == null || missile.part.partInfo == null || !shotTypesSeen.Add(missile.part.partInfo.name)) continue;
+                best = Mathf.Max(best, ShotModel.Estimate(missile, shooter, target));
+            }
+            return best;
         }
         #endregion
 
@@ -377,7 +442,9 @@ namespace BDArmory.Control
             }
             else readout.Add("Target: —");
             if (ShotEstimate >= 0f) readout.Add($"Shot chance: {ShotEstimate:0.00} (fires at {ShotThreshold:0.00})");
-            readout.Add($"Shots held: {missileShotsHeldForOdds} odds, {missileShotsHeldForTerrain} terrain");
+            if (targetVessel != null && PictureOf(targetVessel))
+                readout.Add($"Plan: {planMode} · ours {picture.ourShot:0.00}→{picture.ourShotLater:0.00} · theirs {picture.theirShot:0.00}→{picture.theirShotLater:0.00}{(picture.theirInescapableLater ? " NEZ" : "")}");
+            readout.Add($"Shots held: {missileShotsHeldForOdds} odds, {missileShotsHeldForTiming} timing, {missileShotsHeldForTerrain} terrain");
             return readout;
         }
         #endregion
@@ -555,11 +622,11 @@ namespace BDArmory.Control
             {
                 Vector3 toThreat = (threat.CoM - vessel.CoM) / distance;
                 rearAspectHeatThreat = Vector3.Dot(toThreat, vesselTransform.up) < 0 && Vector3.Dot(threat.ReferenceTransform.up, -toThreat) > 0.866f;
-                if (rearAspectHeatThreat && distance < 4000f && !weaponManager.isFlaring && Time.time - lastPreemptiveFlareTime > 6f && preemptiveFlareSalvos < maxPreemptiveFlareSalvos)
+                if (rearAspectHeatThreat && distance < 4000f && Time.time - lastPreemptiveFlareTime > 6f && (weaponManager.salvoDecisions || preemptiveFlareSalvos < maxPreemptiveFlareSalvos)
+                    && weaponManager.FirePreemptiveFlares()) // Rationed against what the enemies' heat-seekers will need: the rest are kept for missiles actually in the air.
                 {
                     lastPreemptiveFlareTime = Time.time;
-                    ++preemptiveFlareSalvos; // Flares spent before any launch are rationed: the rest are kept for missiles actually in the air.
-                    weaponManager.FireFlares();
+                    ++preemptiveFlareSalvos;
                 }
             }
 

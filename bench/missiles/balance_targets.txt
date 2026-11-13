@@ -1,0 +1,21 @@
+# Missile balance targets for MissileBench balance (launch level at 300 m/s, target at 280 m/s). Only the air-to-air missiles the
+# Modern Warfare 1 craft carry (on 4 or more craft); the rest keep their own configs.
+# run9: no-escape reach at 9 km, the target turning away at launch and running (km); hot9, hot3: head-on reach at 9 and 3 km (km);
+# speedMin, speedMax: band for the speed when the motor stops, level at 6 km (m/s);
+# activeRange (radar missiles, km): where the missile's own radar takes over from the launcher's (written as is, not fitted).
+#
+# Short range, heat seeking: dogfight weapons; leaving the no-escape zone has to be possible from outside visual range.
+# name          hot9  run9  hot3  speedMin speedMax activeRange
+AIM9X            22    7.5   12    950   1150
+AA11Archer       24    8     13    950   1150
+MICA.IR          25    8.5   14    950   1150
+bahaAim9         18    6     10    900   1050
+#
+# Medium range, active radar: the main beyond-visual-range weapons; the launcher supports the shot until the last 15-20 km.
+AIM-120D         60   22     30   1150   1400     20
+bahaAim120       50   18     26   1100   1350     15
+#
+# Long range: largest no-escape zones, least agile; self-guided for the last 25-30 km.
+METEOR           90   40     40   1000   1300     25
+AA13R37Arrow    110   36     45   1200   1500     30
+RVV-AE-PD        90   34     40   1100   1400     25

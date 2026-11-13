@@ -199,6 +199,7 @@ namespace BDArmory.Settings
         [BDAPersistentSettingsField] public static float EXP_DMG_MOD_BALLISTIC_NEW = 0.55f;     // HE bullet explosion damage multiplier
         [BDAPersistentSettingsField] public static float EXP_PEN_RESIST_MULT = 2.50f;           // Armor HE penetration resistance multiplier
         [BDAPersistentSettingsField] public static float EXP_DMG_MOD_MISSILE = 6.75f;           // Missile explosion damage multiplier
+        [BDAPersistentSettingsField] public static bool MISSILE_FRAGMENTS = true;               // Standard missile warheads also throw a belt of penetrating fragments (FX/ExplosionFX)
         [BDAPersistentSettingsField] public static float EXP_DMG_MOD_ROCKET = 1f;               // Rocket explosion damage multiplier (FIXME needs tuning; Note: rockets used Ballistic mod before, but probably ought to be more like missiles)
         [BDAPersistentSettingsField] public static float EXP_DMG_MOD_BATTLE_DAMAGE = 1f;        // Battle damage explosion damage multiplier (FIXME needs tuning; Note: CASE-0 explosions used Missile mod, while CASE-1, CASE-2 and fuel explosions used Ballistic mod)
         [BDAPersistentSettingsField] public static float EXP_DMG_MOD_HEAT = 1f;                 // HEAT warhead spall damage mult
@@ -302,6 +303,7 @@ namespace BDArmory.Settings
         [BDAPersistentSettingsField] public static bool BD_CTRL_SRF = true;             // Disable ctrl srf actuatiors?
         [BDAPersistentSettingsField] public static bool BD_COCKPITS = false;            // Control degredation
         [BDAPersistentSettingsField] public static bool BD_PILOT_KILLS = false;         // Cockpit damage can kill pilots?
+        [BDAPersistentSettingsField] public static bool BD_AIRFRAME_INTEGRITY = true;   // A craft that has lost much of its structure loses control authority and thrust (GameModes/BattleDamage/AirframeIntegrity)
         [BDAPersistentSettingsField] public static bool BD_FIRES_ENABLED = true;        // Can fires occur
         [BDAPersistentSettingsField] public static bool BD_FIRE_DOT = true;             // Do fires do DoT
         [BDAPersistentSettingsField] public static float BD_FIRE_DAMAGE = 5;            // Do fires do DoT

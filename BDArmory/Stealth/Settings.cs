@@ -33,6 +33,7 @@ namespace BDAStealth
         public static bool HomeOnJam = true;          // active radar seekers home on noise jammers (+jammerStrength/100 m² lock signal)
         public static bool SkinStacking = true;       // absorbent armour stacks with the hull material; thin armour fades to the hull, not to bare metal (stock: any armour replaces the hull)
         public static bool JamDeniesRange = true;     // noise jammers show as strobes and block missile datalink until burn-through (stock: only inside the jam radius)
+        public static bool BattleDamage = true;       // lost hitpoints wear coatings and stealth parts, lost parts leave breaches, open bays expose their missiles
         public static bool Messages = true;           // on-screen notes when a decoy or ECM defeats a missile or lock
         public static Preset Preset = Preset.Balanced;
 
@@ -46,7 +47,7 @@ namespace BDAStealth
             Preset = p;
             if (p == Preset.Classic) { Enabled = false; Changed(); return; }
             Enabled = true; ReferenceRcs = 10f;
-            DiminishingStacking = ApplyRcsReduction = JammerReveals = SoftStandoff = BoundJamRadius = FixSeekerUnits = SmoothAspect = GradedFlares = NoAssuredLock = ChaffSeduction = HomeOnJam = SkinStacking = JamDeniesRange = true; CmFloor = 0.15f;
+            DiminishingStacking = ApplyRcsReduction = JammerReveals = SoftStandoff = BoundJamRadius = FixSeekerUnits = SmoothAspect = GradedFlares = NoAssuredLock = ChaffSeduction = HomeOnJam = SkinStacking = JamDeniesRange = BattleDamage = true; CmFloor = 0.15f;
             switch (p)
             {
                 case Preset.Balanced: RangeExponent = 2f; BurnThroughKm = 10f; TrackHold = 1.15f; StealthLimit = 0.03f; FlareChance = 0.25f; ChaffChance = 0.2f; break;
@@ -90,6 +91,7 @@ namespace BDAStealth
                 n.TryGetValue("homeOnJam", ref HomeOnJam);
                 n.TryGetValue("skinStacking", ref SkinStacking);
                 n.TryGetValue("jamDeniesRange", ref JamDeniesRange);
+                n.TryGetValue("battleDamage", ref BattleDamage);
                 n.TryGetValue("messages", ref Messages);
                 string p = n.GetValue("preset");
                 if (p != null && Enum.TryParse(p, out Preset parsed)) Preset = parsed;
@@ -143,6 +145,7 @@ namespace BDAStealth
                 n.AddValue("homeOnJam", HomeOnJam);
                 n.AddValue("skinStacking", SkinStacking);
                 n.AddValue("jamDeniesRange", JamDeniesRange);
+                n.AddValue("battleDamage", BattleDamage);
                 n.AddValue("messages", Messages);
                 root.Save(FilePath, "BDAStealth settings - edit in game via the Radar & Stealth toolbar button");
                 dirty = false;

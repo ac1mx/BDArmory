@@ -954,17 +954,32 @@ namespace BDArmory.Weapons.Missiles
             if (BDArmorySettings.DEBUG_MISSILES) Debug.Log("[BDArmory.MissileLauncher] Start() setup complete");
         }
 
+        /// <summary>
+        /// The static launch ranges can't be edited on MissileLauncher parts but are saved with the craft, so take them from the part config
+        /// (config changes then reach existing craft). Engagement ranges still at those defaults follow them; edited ones are kept, within the new limits.
+        /// </summary>
+        void FollowConfigLaunchRanges(MissileLauncher config)
+        {
+            if (engageRangeMin == minStaticLaunchRange) engageRangeMin = config.minStaticLaunchRange;
+            if (engageRangeMax == maxStaticLaunchRange) engageRangeMax = config.maxStaticLaunchRange;
+            minStaticLaunchRange = config.minStaticLaunchRange;
+            maxStaticLaunchRange = config.maxStaticLaunchRange;
+            if (engageRangeMax > maxStaticLaunchRange) engageRangeMax = maxStaticLaunchRange;
+            if (engageRangeMin > engageRangeMax) engageRangeMin = engageRangeMax;
+        }
+
         public void SetFields(bool checkBaseConfig = true)
         {
             ParseWeaponClass();
             ParseModes();
+            // MMLs **shouldn't** be checking the base config, hence checkBaseConfig being a thing
+            MissileLauncher baseConfig = checkBaseConfig ? part.partInfo.partPrefab.FindModuleImplementing<MissileLauncher>() : null;
+            if (baseConfig != null && baseConfig != this && part.FindModuleImplementing<MultiMissileLauncher>() == null) FollowConfigLaunchRanges(baseConfig);
             InitializeEngagementRange(minStaticLaunchRange, maxStaticLaunchRange);
             uncagedLock = (allAspect) ? allAspect : uncagedLock;
             SetNotchChaffFac();
             guidanceFailureRatePerFrame = (guidanceFailureRate >= 1) ? 1f : 1f - Mathf.Exp(Mathf.Log(1f - guidanceFailureRate) * Time.fixedDeltaTime); // Convert from per-second failure rate to per-frame failure rate
             //invManeuvergLimit = 1f / maneuvergLimit;
-            // MMLs **shouldn't** be checking the base config, hence checkBaseConfig being a thing
-            MissileLauncher baseConfig = checkBaseConfig ? part.partInfo.partPrefab.FindModuleImplementing<MissileLauncher>() : null;
 
             if (proxyDetonate)
             {
@@ -2377,6 +2392,7 @@ namespace BDArmory.Weapons.Missiles
                     if (vessel.altitude >= maxAltitude && maxAltitude != 0f)
                         if (BDArmorySettings.DEBUG_MISSILES) Debug.Log("[BDArmory.MissileLauncher]: CheckMiss trigged by MaxAltitude");
 
+                    if (missReason == null) missReason = noProgress ? (MissileState == MissileStates.PostThrust && vessel.srfSpeed < GetKinematicSpeed() ? "tooSlow" : "noProgress") : !TargetAcquired ? "noTarget" : maxAltitude != 0f && vessel.altitude >= maxAltitude ? "maxAltitude" : "pastTarget";
                     HasMissed = true;
                     guidanceActive = false;
 
@@ -4200,6 +4216,8 @@ namespace BDArmory.Weapons.Missiles
         public override Vector3 GetForwardTransform()
         {
             if (multiLauncher && multiLauncher.overrideReferenceTransform)
+                return vessel.ReferenceTransform.up;
+            else if (deployableRail && !HasFired && deployableRail.DeployFraction < 1f) // Stowed: the rail moves the missile's model, so aim along the airframe it will be launched along.
                 return vessel.ReferenceTransform.up;
             else
                 return MissileReferenceTransform.forward;
