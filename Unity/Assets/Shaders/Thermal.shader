@@ -37,8 +37,9 @@ Shader "BDArmory/GPU/Thermal"
     {
         float sun = saturate(dot(normalize(i.normal), _BDThermalSun.xyz)) * _BDThermalSun.w;
         float detail = (Luminance(tex2D(_MainTex, i.uv).rgb) - 0.5) * _BDThermalScene.w;
-        float level = _BDHeat >= 0.0
-            ? lerp(_BDThermalScene.z, 1.0, saturate(_BDHeat)) + sun * 0.5 * _BDThermalScene.y
+        float heat = _BDHeat - 1.0; // Stored +1 (ThermalView): materials without it read 0, i.e. not a part.
+        float level = heat >= 0.0
+            ? lerp(_BDThermalScene.z, 1.0, saturate(heat)) + sun * 0.5 * _BDThermalScene.y
             : _BDThermalScene.x + sun * _BDThermalScene.y;
         return saturate(level + detail);
     }

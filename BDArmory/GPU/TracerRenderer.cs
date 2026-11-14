@@ -49,7 +49,6 @@ namespace BDArmory.GPU
         static readonly int segmentsID = Shader.PropertyToID("_Segments"), camScaleID = Shader.PropertyToID("_BDTracerCamScale");
         readonly Dictionary<Texture, Group> tracerGroups = new Dictionary<Texture, Group>();
         readonly Dictionary<Texture, Group> smokeGroups = new Dictionary<Texture, Group>();
-        static readonly Bounds everywhere = new Bounds(Vector3.zero, Vector3.one * 1e8f);
         readonly Vector3[] smokePoints = new Vector3[5];
         readonly float[] smokeLengths = new float[5];
 
@@ -145,6 +144,23 @@ namespace BDArmory.GPU
             }
         }
 
+        /// <summary>The group's segments' extent, padded for the quads' camera-scaled width.</summary>
+        static Bounds Bounds(Group group)
+        {
+            Vector3 min = group.segments[0].p0, max = min;
+            float width = 0f;
+            for (int i = 0; i < group.count; ++i)
+            {
+                ref var s = ref group.segments[i];
+                min = Vector3.Min(min, Vector3.Min(s.p0, s.p1));
+                max = Vector3.Max(max, Vector3.Max(s.p0, s.p1));
+                width = Mathf.Max(width, Mathf.Max(s.w0, s.w1));
+            }
+            var bounds = new Bounds((min + max) * 0.5f, max - min);
+            bounds.Expand(width * 4f * 3000f / 50f * 3f); // Shader width factor at most (fov / 60) * 4 * 3000 / 50.
+            return bounds;
+        }
+
         static Group GetGroup(Dictionary<Texture, Group> groups, Texture texture)
         {
             if (!groups.TryGetValue(texture, out var group))
@@ -168,7 +184,7 @@ namespace BDArmory.GPU
                 }
                 group.buffer.SetData(group.segments, 0, 0, group.count);
                 group.material.renderQueue = renderQueue;
-                Graphics.DrawProcedural(group.material, everywhere, MeshTopology.Triangles, group.count * 6, 1, null, null, ShadowCastingMode.Off, false, TracerLayer);
+                Graphics.DrawProcedural(group.material, Bounds(group), MeshTopology.Triangles, group.count * 6, 1, null, null, ShadowCastingMode.Off, false, TracerLayer);
             }
         }
     }

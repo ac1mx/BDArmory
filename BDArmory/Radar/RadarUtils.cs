@@ -807,7 +807,8 @@ namespace BDArmory.Radar
                     instancedLight[i] = -aspect;
                 }
                 PrepareRadarMaterials(v);
-                aspectSlices = GPU.RcsInstancedRender.Render(v, BDAShaderLoader.RCSShader, radarResolution, numAspects, instancedVP, instancedLight);
+                aspectSlices = GPU.RcsInstancedRender.Render(v, BDAShaderLoader.RCSShader, radarResolution, numAspects, instancedVP, instancedLight,
+                    radarCam, i => SetupRadarCamera(t, false, t.TransformDirection(rcsDirArray[i]), vesselbounds, radarDistance, radarFOV, rcsRenderingVariable));
             }
             bool instanced = aspectSlices != null && GPU.RcsGpuReduction.BeginSlices(numAspects, aspectSlices);
             bool gpuSum = instanced || deferredRead && GPU.RcsGpuReduction.Begin(numAspects, rcsRenderingVariable);
@@ -1106,13 +1107,16 @@ namespace BDArmory.Radar
             float[,] rcsMatrix = new float[numAspects, 3];
             if (rcsValues.Length != numAspects) Array.Resize(ref rcsValues, numAspects);
             float largestDifference = 0f;
-            int identical = 0;
+            int identical = 0, higher = 0;
+            double gpuTotal = 0, checkTotal = 0;
             for (int i = 0; i < numAspects; i++)
             {
                 float rcsVariable = sums[i] / 255f;
                 if (checkValues != null)
                 {
                     if (rcsVariable == checkValues[i]) ++identical;
+                    if (rcsVariable > checkValues[i]) ++higher;
+                    gpuTotal += rcsVariable; checkTotal += checkValues[i];
                     largestDifference = Mathf.Max(largestDifference, Mathf.Abs(rcsVariable - checkValues[i]) / Mathf.Max(1f, checkValues[i]));
                 }
                 rcsVariable /= RCS_NORMALIZATION_FACTOR;
@@ -1125,7 +1129,7 @@ namespace BDArmory.Radar
             if (BDArmorySettings.ASPECTED_RCS)
                 Array.Resize(ref rcsValues, numAspectsForOverallRTEval);
             float total = (float)Percentile(rcsValues, 75d);
-            if (checkValues != null) Debug.Log($"[BDArmory.RadarUtils]: RCS GPU check {vesselName}: {identical}/{numAspects} aspects identical to the per-aspect camera renders read back on the CPU, largest relative difference {largestDifference:G3}, signature {total:G6} m², GPU path {path}");
+            if (checkValues != null) Debug.Log($"[BDArmory.RadarUtils]: RCS GPU check {vesselName}: {identical}/{numAspects} aspects identical to the per-aspect camera renders read back on the CPU, largest relative difference {largestDifference:G3}, {higher} higher, all aspects {gpuTotal:G6} vs {checkTotal:G6}, signature {total:G6} m², GPU path {path}");
             if (ti == null || v == null) return; // Vessel gone meanwhile.
             ti.radarBaseSignature = total;
             ti.radarSignatureMatrix = rcsMatrix;

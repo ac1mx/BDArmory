@@ -57,6 +57,8 @@ namespace BDArmory.GPU
         }
 
         static Camera nearProxy, farProxy;
+        static readonly List<Component> foreign = new List<Component>();
+        static readonly List<Renderer> partRenderers = new List<Renderer>();
 
         static Camera Proxy(ref Camera proxy, Camera source, string name)
         {
@@ -65,7 +67,16 @@ namespace BDArmory.GPU
                 proxy = new GameObject(name).AddComponent<Camera>();
                 proxy.enabled = false;
             }
+            // Other mods attach their passes to every camera that renders (Scatterer's scattering adds a command buffer component
+            // from OnWillRenderObject and remembers the camera, so once removed it stays off): keep the proxy a bare camera.
+            proxy.GetComponents(foreign);
+            for (int i = 0; i < foreign.Count; ++i)
+                if (!(foreign[i] is Transform) && !(foreign[i] is Camera)) Object.DestroyImmediate(foreign[i]);
+            proxy.RemoveAllCommandBuffers();
             proxy.CopyFrom(source); // Settings, target, culling mask and pose.
+            // Forward: deferred shading (the Deferred mod's camera setting, copied here) lights the empty G-buffer of a
+            // replacement-shader render and washes the image out.
+            proxy.renderingPath = RenderingPath.Forward;
             proxy.clearFlags = CameraClearFlags.Depth;
             proxy.allowHDR = false;
             proxy.allowMSAA = false;
@@ -91,7 +102,11 @@ namespace BDArmory.GPU
                 var r = renderers[i];
                 var part = owners[i];
                 if (r == null || part == null) continue;
-                if (!heatThisPass.TryGetValue(part, out float heat)) heatThisPass[part] = heat = PartHeat(part);
+                if (!heatThisPass.TryGetValue(part, out float heat))
+                {
+                    heatThisPass[part] = heat = PartHeat(part);
+                    part.mpb?.SetFloat(heatID, heat + 1f); // KSP re-applies the part's block to its renderers (highlighting).
+                }
                 if (Mathf.Abs(heat - applied[i]) < 0.02f) continue;
                 applied[i] = heat;
                 r.GetPropertyBlock(block);
@@ -112,10 +127,12 @@ namespace BDArmory.GPU
                 for (int p = 0; p < vessel.parts.Count; ++p)
                 {
                     var part = vessel.parts[p];
-                    if (part == null || part.HighlightRenderer == null) continue;
-                    for (int k = 0; k < part.HighlightRenderer.Count; ++k)
+                    if (part == null) continue;
+                    var list = part.HighlightRenderer;
+                    if (list == null || list.Count == 0) { part.GetComponentsInChildren(false, partRenderers); list = partRenderers; }
+                    for (int k = 0; k < list.Count; ++k)
                     {
-                        var r = part.HighlightRenderer[k];
+                        var r = list[k];
                         if (r == null) continue;
                         renderers.Add(r); owners.Add(part); applied.Add(-10f);
                     }
