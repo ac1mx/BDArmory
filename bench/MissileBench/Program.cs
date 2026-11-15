@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using BDArmory.Control;
+using BDArmory.Guidances;
 
 // Missile config bench on the game's own flight replica (BDArmory/Control/MissileFlyout.cs).
 //   tables <missiles.json> [atmosphere.txt]                       reach of each missile against straight-flying and running targets
@@ -275,6 +276,58 @@ static class Program
         if (patchPath != null) File.WriteAllText(patchPath, patch.ToString());
     }
 
+    /// <summary>
+    /// Homing laws against a target that breaks or weaves late, and motor modes for reach and arrival speed: each missile at shares of
+    /// its head-on reach, from ahead, abeam and behind.
+    /// </summary>
+    static void Laws(string missilesPath, string[] names)
+    {
+        var missiles = LoadMissiles(missilesPath);
+        var laws = new[] { GuidanceLaw.ProNav, GuidanceLaw.Optimal, GuidanceLaw.Game, GuidanceLaw.SlidingMode };
+        const double altitude = 6000, launchSpeed = 300, targetSpeed = 280;
+        Console.WriteLine("Hits out of the evasion cases (9 g break at 6/3/1.5 s to go either way, 7 g weave 4 s/2 s from 10 s) x aspects (0/60/120/180) x range (30/55/80% of head-on reach); mean miss (m) of the misses.");
+        Console.WriteLine($"{"missile",-14}" + string.Concat(laws.Select(l => $"{l,16}")));
+        foreach (var name in names)
+        {
+            if (!missiles.TryGetValue(name, out var entry)) { Console.WriteLine($"{name}: not in {missilesPath}"); continue; }
+            var m = entry.spec;
+            double reach = Reach(m, altitude, launchSpeed, targetSpeed, 0, false);
+            string row = $"{name,-14}";
+            foreach (var law in laws)
+            {
+                var spec = m; spec.law = law; spec.targetMax = 90f;
+                int hits = 0, n = 0; double miss = 0;
+                foreach (double share in new[] { 0.3, 0.55, 0.8 })
+                    foreach (double aspect in new[] { 0.0, 60, 120, 180 })
+                        foreach (var (g, tgo, period) in new[] { (9f, 6f, 0f), (-9f, 6f, 0f), (9f, 3f, 0f), (-9f, 3f, 0f), (9f, 1.5f, 0f), (-9f, 1.5f, 0f), (7f, 10f, 4f), (-7f, 10f, 4f), (7f, 10f, 2f), (-7f, 10f, 2f) })
+                        {
+                            double a = aspect * Math.PI / 180.0, range = share * reach * (aspect > 90 ? 0.5 : 1);
+                            var result = MissileFlyout.Fly(spec, launchSpeed, 0, 0, range, 0, 0, -targetSpeed * Math.Cos(a), targetSpeed * Math.Sin(a), 0, 0, 0, 0, targetSpeed,
+                                altitude, Density, Gravity, SpeedOfSound, evadeG: g, evadeTimeToGo: tgo, evadePeriod: period);
+                            ++n;
+                            if (result.reached) ++hits; else miss += result.missDistance;
+                        }
+                row += $"{hits,7}/{n,-3}{(n > hits ? miss / (n - hits) : 0),5:F0}";
+            }
+            Console.WriteLine(row);
+        }
+        Console.WriteLine();
+        Console.WriteLine("Motor modes: reach (km) hot / running target at 6 km, and arrival speed (m/s) and time (s) on a hot shot at 60% of the sustain reach.");
+        Console.WriteLine($"{"missile",-14}{"mode",-10}{"hot",7}{"run",7}{"v@60%",8}{"t@60%",7}{"run9",7}{"run14",7}");
+        foreach (var name in names)
+        {
+            if (!missiles.TryGetValue(name, out var entry)) continue;
+            double baseReach = Reach(entry.spec, altitude, launchSpeed, targetSpeed, 0, false);
+            foreach (var (mode, minThrottle) in new[] { (MotorMode.Sustain, 0f), (MotorMode.Pulse, 0f), (MotorMode.Throttle, 0.3f), (MotorMode.Throttle, 0.5f) })
+            {
+                var spec = entry.spec; spec.motor = mode; spec.minThrottle = minThrottle;
+                var at60 = Shot(spec, altitude, launchSpeed, 0.6 * baseReach, altitude, targetSpeed, 0, false);
+                Console.WriteLine($"{name,-14}{mode + (minThrottle > 0 ? " " + minThrottle.ToString(Inv) : ""),-13}{Reach(spec, altitude, launchSpeed, targetSpeed, 0, false) / 1000,5:F1}{Reach(spec, altitude, launchSpeed, targetSpeed, 0, true) / 1000,7:F1}" +
+                    $"{at60.speed,8:F0}{at60.time,7:F1}{Reach(spec, 9000, launchSpeed, targetSpeed, 0, true) / 1000,7:F1}{Reach(spec, 14000, launchSpeed, targetSpeed, 0, true) / 1000,7:F1}");
+            }
+        }
+    }
+
     static List<string> SplitCsv(string line)
     {
         var cells = new List<string>(); var cur = new System.Text.StringBuilder(); bool quoted = false;
@@ -299,6 +352,7 @@ static class Program
         if (args.Length >= 2 && args[0] == "tables") { LoadAtmosphere(args.Length > 2 ? args[2] : null); Tables(args[1]); return 0; }
         if (args.Length >= 4 && args[0] == "features") { LoadAtmosphere(args.Length > 4 ? args[4] : null); Features(args[1], args[2], args[3]); return 0; }
         if (args.Length >= 4 && args[0] == "balance") { LoadAtmosphere(args.Length > 4 ? args[4] : null); Balance(args[1], args[2], args[3]); return 0; }
+        if (args.Length >= 3 && args[0] == "laws") { LoadAtmosphere(args[2]); Laws(args[1], args.Skip(3).ToArray()); return 0; }
         if (args.Length >= 3 && args[0] == "timing") { LoadAtmosphere(args.Length > 4 ? args[4] : null); Timing(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 5); return 0; }
         Console.WriteLine("usage: tables <missiles.json> [atmosphere.txt] | features <missiles.json> <shots.csv> <out.csv> [atmosphere.txt]" +
             " | balance <missiles.json> <targets.txt> <patch.cfg> [atmosphere.txt] | timing <missiles.json> <KSP.log> [repeats] [atmosphere.txt]");

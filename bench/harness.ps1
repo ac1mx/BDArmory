@@ -1,8 +1,35 @@
 # Shared by the unattended test runs (dot-source it): back up the game files a run changes, apply the test settings, restore them.
 # Test settings: lethal damage (well above both the save's and BDArmory's defaults, so that hits end fights), and TUFX's empty
 # profile and no volumetric clouds in flight (through KSPTweaks at run time, so no ModuleManager config changes).
+#
+# A run that is stopped before it restores (its shell killed) leaves <Ksp>\harness_pending.json, which names its backup folder and
+# everything it put in the game folder. The next run restores from it before touching anything, so a backup is never taken of files
+# an earlier run left changed.
+
+function Get-PendingPath([string]$Ksp) { "$Ksp\harness_pending.json" }
+
+function Save-Pending {
+    $state = @{ out = $script:HarnessOut; files = $script:HarnessFiles; remove = @($script:HarnessRemove) }
+    [IO.File]::WriteAllText((Get-PendingPath $script:HarnessKsp), ($state | ConvertTo-Json -Depth 4))
+}
+
+# Restores what an interrupted run left behind. Returns $false while KSP is still running (nothing can be restored yet).
+function Restore-Pending([string]$Ksp) {
+    $pending = Get-PendingPath $Ksp
+    if (-not (Test-Path $pending)) { return $true }
+    if (Get-Process KSP_x64 -ErrorAction SilentlyContinue) { return $false }
+    $state = Get-Content $pending -Raw | ConvertFrom-Json
+    foreach ($f in $state.files.PSObject.Properties) {
+        if (Test-Path "$($state.out)\$($f.Name).before") { Copy-Item "$($state.out)\$($f.Name).before" $f.Value -Force }
+    }
+    foreach ($r in $state.remove) { Remove-Item $r -Force -ErrorAction SilentlyContinue }
+    Remove-Item $pending -Force
+    Write-Host "restored the files an interrupted run left changed (backup: $($state.out))"
+    return $true
+}
 
 function Backup-GameFiles([string]$Ksp, [string]$Out) {
+    $script:HarnessKsp = $Ksp; $script:HarnessOut = $Out; $script:HarnessRemove = @()
     $script:HarnessFiles = [ordered]@{
         "persistent.sfs"   = "$Ksp\saves\Modern Warfare 1\persistent.sfs"
         "BDAPerf.cfg"      = "$Ksp\GameData\BDAPerf\PluginData\BDAPerf.cfg"
@@ -10,10 +37,19 @@ function Backup-GameFiles([string]$Ksp, [string]$Out) {
         "KSPTweaks.cfg"    = "$Ksp\GameData\KSPTweaks\PluginData\KSPTweaks.cfg"
         "TUFX.cfg"         = "$Ksp\GameData\TUFX\TUFX.cfg"
         "BDArmory.dll"     = "$Ksp\GameData\BDArmory\Plugins\BDArmory.dll"
+        "shot_model.cfg"   = "$Ksp\GameData\BDArmory\PluginData\shot_model.cfg"
     }
     foreach ($name in $script:HarnessFiles.Keys) {
         if (Test-Path $script:HarnessFiles[$name]) { Copy-Item $script:HarnessFiles[$name] "$Out\$name.before" -Force }
+        else { Remove-Item "$Out\$name.before" -Force -ErrorAction SilentlyContinue; $script:HarnessRemove += $script:HarnessFiles[$name] }
     }
+    Save-Pending
+}
+
+# Files the run creates in the game folder, to be removed when it restores.
+function Add-HarnessCleanup([string[]]$Paths) {
+    $script:HarnessRemove += $Paths
+    Save-Pending
 }
 
 function Set-CfgValue([string]$Text, [string]$Key, [string]$Value) {
@@ -48,4 +84,35 @@ function Restore-GameFiles([string]$Out) {
     foreach ($name in $script:HarnessFiles.Keys) {
         if (Test-Path "$Out\$name.before") { Copy-Item "$Out\$name.before" $script:HarnessFiles[$name] -Force }
     }
+    foreach ($r in $script:HarnessRemove) { Remove-Item $r -Force -ErrorAction SilentlyContinue }
+    Remove-Item (Get-PendingPath $script:HarnessKsp) -Force -ErrorAction SilentlyContinue
+}
+
+# Waits for this run's KSP. Stops it early, by its own handle, when:
+#  - the first $ValidateAfter shot results are in and a pattern in $Expect has no match in the log (the run is set up wrong), or
+#  - every word in $ArmWords (or the log as a whole, without any) has $StopAfterShots shot results from craft named with it, or
+#  - it is still running 90 s after the benchmark driver logged its quit (it can hang tearing down the flight scene).
+function Wait-HarnessRun($Process, [string]$Ksp, [int]$Duration, [int]$StopAfterShots = 0, [string[]]$ArmWords = @(), [string[]]$Expect = @(), [int]$ValidateAfter = 10) {
+    $log = "$Ksp\KSP.log"
+    $deadline = (Get-Date).AddSeconds($Duration + 900); $fightEnd = (Get-Date).AddSeconds($Duration); $quitSeen = $null; $validated = $Expect.Count -eq 0
+    while (-not $Process.HasExited -and (Get-Date) -lt $deadline) {
+        if ($Process.WaitForExit(20000)) { break }
+        if (($StopAfterShots -gt 0 -or -not $validated) -and (Test-Path $log)) {
+            # Guided shots only: stores a craft drops (tanks) are logged as shots without guidance.
+            $shots = @(Select-String -Path $log -Pattern 'MissileShot .* decoys=' | ForEach-Object { $_.Line } | Where-Object { $_ -notmatch 'guidance=None' })
+            if (-not $validated -and $shots.Count -ge $ValidateAfter) {
+                $missing = @($Expect | Where-Object { -not (Select-String -Path $log -Pattern $_ -Quiet) })
+                if ($missing.Count) { "INVALID RUN, stopping it: no log line matches $($missing -join ' | ')"; $Process.Kill(); $Process.WaitForExit(30000) | Out-Null; break }
+                $validated = $true; "valid after $($shots.Count) shots"
+            }
+            if ($StopAfterShots -gt 0) {
+                $counts = if ($ArmWords.Count) { $ArmWords | ForEach-Object { $w = $_; @($shots | Where-Object { $_ -match "from=\S*$w" }).Count } } else { $shots.Count }
+                if (($counts | Measure-Object -Minimum).Minimum -ge $StopAfterShots) { "shot count reached ($($counts -join ' / ')); stopping KSP"; $Process.Kill(); $Process.WaitForExit(30000) | Out-Null; break }
+            }
+        }
+        if ((Get-Date) -lt $fightEnd) { continue }
+        if (-not $quitSeen -and (Select-String -Path $log -Pattern 'Benchmark done, quitting' -SimpleMatch -Quiet)) { $quitSeen = Get-Date }
+        if ($quitSeen -and ((Get-Date) - $quitSeen).TotalSeconds -gt 90) { "KSP hung after quitting; stopping it"; $Process.Kill(); $Process.WaitForExit(30000) | Out-Null; break }
+    }
+    if (-not $Process.HasExited) { "KSP did not exit by itself within the limit; left running" }
 }

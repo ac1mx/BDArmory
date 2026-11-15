@@ -194,12 +194,42 @@ namespace BDArmory.Control
         bool EnergyBeforeShot(Vessel v, MissileBase missile, float distanceToTarget, ref Vector3 target)
         {
             if (!TacticsAllowed(WeaponManager) || v.LandedOrSplashed) return false;
+            if (LoftLaunch(v, missile, distanceToTarget, ref target)) return true;
             if (distanceToTarget < MissileLaunchParams.GetDynamicLaunchParams(missile, v.Velocity(), v.CoM).maxLaunchRange) return false; // In range: point and shoot.
             float climb = (float)(v.altitude - vessel.altitude) + Mathf.Min(2000f, 0.1f * distanceToTarget);
             if (maxAltitudeEnabled) climb = Mathf.Min(climb, maxAltitude - (float)vessel.radarAltitude);
             if (climb <= 0) return false;
             target += Mathf.Min(climb, 0.2f * distanceToTarget) * upDirection;
             { ++energyClimbTicks; NoteTactic("Climb before shot"); }
+            return true;
+        }
+
+        const float loftMinRange = 8000f, loftMinGain = 0.04f, loftPressure = 0.35f;
+        int launchLoftTicks, dragTicks, maskTicks;
+
+        /// <summary>
+        /// Lofting the launch: with a long shot that isn't good enough yet and nothing pressing us, hold the nose above the line to the
+        /// target at full power, as far as the missile flyout says it helps: the missile leaves climbing into thinner air and comes down
+        /// on the target with more speed. The shot is taken as soon as its chance clears the threshold on the way up.
+        /// </summary>
+        bool LoftLaunch(Vessel v, MissileBase missile, float distanceToTarget, ref Vector3 target)
+        {
+            var weaponManager = WeaponManager;
+            if (!PlanActive(weaponManager) || !NewAwareness || !PictureOf(v) || missile.TargetingMode == MissileBase.TargetingModes.Heat) return false;
+            if (distanceToTarget < loftMinRange || picture.assistGain < loftMinGain || weaponManager.missileIsIncoming) return false;
+            if (picture.theirShot >= loftPressure || picture.theirInescapable) return false; // No time for it.
+            if (picture.ourMaxRange > 0f && distanceToTarget > 1.3f * picture.ourMaxRange) return false; // Too far out for a launch soon: the plain climb does more.
+            if (ShotEstimate >= ShotThreshold && Time.time - shotDecisionTime < 2f * shotDecisionInterval) return false; // Good enough as it is: shoot.
+            if (vessel.srfSpeed < Mathf.Max(cornerSpeed, 1.5f * minSpeed)) return false; // Speed first.
+            float loft = Mathf.Min(launchLoftAngle, 0.3f * missile.maxOffBoresight, CrankAngle(weaponManager));
+            if (maxAltitudeEnabled && vessel.radarAltitude > maxAltitude - 500f) return false;
+            if (loft < 3f) return false;
+            Vector3 toTarget = target - vesselTransform.position;
+            Vector3 axis = Vector3.Cross(toTarget, upDirection);
+            if (axis.sqrMagnitude < 1e-3f) return false;
+            target = vesselTransform.position + Quaternion.AngleAxis(loft, axis.normalized) * toTarget;
+            AdjustThrottle(maxSpeed, false, true);
+            { ++launchLoftTicks; NoteTactic("Loft launch"); }
             return true;
         }
 
@@ -349,6 +379,11 @@ namespace BDArmory.Control
             {
                 shotDecision = true;
                 forcingPendingUntil = Time.time + 3f;
+            }
+            if (!shotDecision && NoEscapeShotWanted(weaponManager, target, missile, features))
+            {
+                shotDecision = true;
+                noEscapePendingUntil = Time.time + 3f;
             }
             if (!shotDecision && FreeShotWanted(weaponManager, target, missile, features))
             {

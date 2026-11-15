@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\BDArmory\Control\MissileFlyout.cs" Link="MissileFlyout.cs" />
+    <Compile Include="..\..\BDArmory\Guidances\GuidanceLaws.cs" Link="GuidanceLaws.cs" />
   </ItemGroup>
 </Project>

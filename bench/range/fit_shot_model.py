@@ -1,6 +1,6 @@
 """Fit the shot model (BDArmory/Control/ShotModel.cs) to logged missile shots and compare it with the model that was flying.
 
-Usage: python fit_shot_model.py <KSP.log | features.csv> [...] [--out shot_model.cfg] [--folds 5] [--range-only]
+Usage: python fit_shot_model.py <KSP.log | features.csv> [...] [--out shot_model.cfg] [--folds 5] [--range-only] [--smart-only] [--advanced-only] [--parts A,B]
 
 Inputs are KSP.log files (MissileShot lines carrying the in-game flight prediction fields) or CSV files with the same columns
 (bench/MissileBench features). The feature vector is built exactly as ShotModel.Features.Vector builds it. Per-missile offsets are
@@ -10,12 +10,16 @@ the weights; --out writes them in the format ShotModel reads."""
 import csv, math, random, re, sys
 
 FIELD = re.compile(r'(\w+)=(\S+)')
-NAMES = ["bias", "reaches", "escapeReaches", "energyMargin", "flightTime", "hot", "cold", "offBoresight", "heat", "launcherGuided", "lateralG", "low"]
+NAMES = ["bias", "reaches", "escapeReaches", "energyMargin", "flightTime", "hot", "cold", "offBoresight", "heat", "launcherGuided", "lateralG", "low", "reach", "offNose"]
+# Motor burn time (s) and optimum airspeed (m/s) per part, for logs written before the shot record carried reach=.
+MOTORS = {"AIM-120D": (14.7, 1250.0), "AIM9X": (7.9, 780.0)}
+# Test copies of a part count as the part.
+ALIASES = {"AIM-120D-L": "AIM-120D", "AIM-120D-L2": "AIM-120D", "AIM-120D-S": "AIM-120D", "AIM-120D-SA": "AIM-120D", "AIM9X-S": "AIM9X", "AIM9X-SA": "AIM9X"}
 HOT_ASPECT, COLD_ASPECT, LOW_ALTITUDE = 60.0, 135.0, 500.0
 L2_SHARED, L2_MISSILE = 0.5, 4.0
 
 
-def load(paths, range_only):
+def load(paths, range_only, only_parts=None, smart_only=False, advanced_only=False):
     rows = []
     for path in paths:
         if path.lower().endswith('.csv'):
@@ -23,9 +27,14 @@ def load(paths, range_only):
             continue
         for line in open(path, encoding='utf-8', errors='replace'):
             if 'MissileShot ' not in line or 'flyReaches=' not in line: continue
+            if 'guidance=None' in line: continue  # Stores a craft drops (tanks) are logged as shots without guidance.
             if range_only and 'harness=range' not in line: continue
             d = dict(FIELD.findall(line.split('MissileShot ', 1)[1]))
+            if only_parts and d.get('part') not in only_parts: continue
+            if smart_only and d.get('smart') != 'True': continue  # Shots flown with the stock seekers say little about the smart ones.
+            if advanced_only and d.get('advanced') != 'True': continue  # Nor do shots flown without the missiles' homing laws and motor modes.
             d['heat'] = str(d.get('mode') == 'Heat')
+            d['part'] = ALIASES.get(d.get('part'), d.get('part'))
             rows.append(d)
     return [r for r in rows if r.get('vel', '1') != '0,0,0' and r.get('flyReaches') in ('True', 'False')]
 
@@ -35,8 +44,23 @@ def num(r, k, default=0.0):
     except (KeyError, ValueError): return default
 
 
+def reach(r):
+    if 'reach' in r: return num(r, 'reach')
+    burn, speed = MOTORS.get(r.get('part'), (12.0, 1000.0))
+    return max(-1.0, min(3.0, (num(r, 'range') - num(r, 'closure') * burn) / (speed * burn)))
+
+
+def off_nose(r):
+    if 'offNose' in r: return num(r, 'offNose')
+    return max(0.0, min(3.0, (abs(num(r, 'offBoresight')) - 45.0) / 45.0))
+
+
 def vector(r):
     aspect = num(r, 'aspect')
+    return base_vector(r, aspect) + [reach(r), off_nose(r)]
+
+
+def base_vector(r, aspect):
     return [1.0, float(r['flyReaches'] == 'True'), float(r.get('escReaches') == 'True'), num(r, 'energyMargin'), num(r, 'flyTime') / 30.0,
             float(aspect < HOT_ASPECT), float(aspect > COLD_ASPECT), num(r, 'offBoresightFraction'), float(r.get('heat') == 'True'),
             num(r, 'launcherGuided'), min(num(r, 'flyG'), 40.0) / 10.0, float(num(r, 'launchAlt', 1e4) < LOW_ALTITUDE)]
@@ -95,9 +119,15 @@ def main():
     args = sys.argv[1:]
     out = None; folds = 5; range_only = '--range-only' in args
     if range_only: args.remove('--range-only')
+    smart_only = '--smart-only' in args
+    if smart_only: args.remove('--smart-only')
+    advanced_only = '--advanced-only' in args
+    if advanced_only: args.remove('--advanced-only')
     if '--out' in args: i = args.index('--out'); out = args[i + 1]; del args[i:i + 2]
     if '--folds' in args: i = args.index('--folds'); folds = int(args[i + 1]); del args[i:i + 2]
-    rows = load(args, range_only)
+    only_parts = None
+    if '--parts' in args: i = args.index('--parts'); only_parts = set(args[i + 1].split(',')); del args[i:i + 2]  # Part names as logged, before aliasing.
+    rows = load(args, range_only, only_parts, smart_only, advanced_only)
     if len(rows) < 20: print(f"only {len(rows)} usable shots"); return
     xs = [vector(r) for r in rows]; ys = [float(r['hit'] == 'True') for r in rows]; parts = [r['part'] for r in rows]
     missiles = sorted(set(parts))

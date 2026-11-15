@@ -41,6 +41,9 @@ namespace BDArmory.Radar
 
         [KSPField]
         public int rwrThreatType = 0;               //IMPORTANT, configures which type of radar it will show up as on the RWR
+
+        [KSPField]
+        public float rwrDetectability = 1f;         // Share of the usual range from which warning receivers hear this radar (below 1: low probability of intercept).
         public RadarWarningReceiver.RWRThreatTypes rwrType = RadarWarningReceiver.RWRThreatTypes.SAM;
 
         [KSPField]

@@ -39,6 +39,7 @@ namespace BDAStealth
             public Vector3d Geo;
             public Vector3 Velocity;
             public CelestialBody Body;
+            public float Pull, PullTime;   // smart seekers: pull gathered from recent bundles (StealthMath.ChaffPull)
         }
 
         sealed class RadarLocks { public readonly ConditionalWeakTable<Vessel, StrongBox<int>> Seen = new ConditionalWeakTable<Vessel, StrongBox<int>>(); }
@@ -99,6 +100,16 @@ namespace BDAStealth
             float eff = m.chaffEffectivity;
             ModuleRadar radar = !m.ActiveRadar && m.radarTarget.exists ? m.radarTarget.lockedByRadar : null;
             if (radar != null) eff *= radar.radarChaffClutterFactor;
+            if (m.smartSeeker && m.HomingOnJam) { beamingChance = 0f; return 0f; } // Homing on our jamming: chaff is no echo it listens for.
+            if (m.smartSeeker)
+            {
+                // The share of the pull needed that one bundle gives now, and would give dead on the beam, on top of what is already gathered.
+                TargetInfo info = m.radarTarget.exists ? m.radarTarget.targetInfo : tv.gameObject.GetComponent<TargetInfo>();
+                float gathered = tracks.TryGetValue(m, out Track held) && held.Target == tv ? StealthMath.PullAfter(held.Pull, Time.time - held.PullTime) : 0f;
+                float one = SmartPull(m, tv, info, 1, eff, out _, out float skin, out _);
+                beamingChance = Mathf.Clamp01(gathered + StealthMath.ChaffPull(1, eff, Settings.CmFloor, 0f, m.velocityGate, skin));
+                return one > 0f ? Mathf.Clamp01(gathered + one) : 0f;
+            }
             float p = Chance(tv, m.radarTarget.exists ? m.radarTarget.targetInfo : tv.gameObject.GetComponent<TargetInfo>(), m.transform.position, eff, out _, out float rcs, out _);
             beamingChance = StealthMath.ChaffSeduction(Settings.ChaffChance, eff, Settings.CmFloor, 1f, rcs);
             return p;
@@ -110,6 +121,7 @@ namespace BDAStealth
         {
             MissileBase m = __instance;
             Vessel tv = m.TargetAcquired && m.radarTarget.exists ? m.radarTarget.vessel : null;
+            m.UpdateHomeOnJam(tv);
             float eff = m.chaffEffectivity;
             if (tv != null && !m.ActiveRadar)
             {
@@ -148,13 +160,83 @@ namespace BDAStealth
             }
 
             if (t == null || now >= t.Until || !m.TargetAcquired || t.Body == null) return;
+            if (m.smartSeeker && tv != null && (Resolved(m, tv) || m.HomingOnJam)) { t.Until = now; return; } // Close enough to pick the craft out again, or homing on its jamming.
             m.TargetPosition = VectorUtils.GetWorldSurfacePostion(t.Geo, t.Body) + t.Velocity * (now - t.From);
             m.TargetVelocity = t.Velocity;
             m.TargetAcceleration = Vector3.zero;
         }
 
+        /// <summary>Pull of bundles from tv on the smart seeker m's track, at the current geometry.</summary>
+        static float SmartPull(MissileBase m, Vessel tv, TargetInfo ti, int bundles, float effectivity, out float radial, out float rcs, out float range, bool acrossLineOfSight = false)
+        {
+            // The track is held from wherever it is measured: the missile's own seeker once that is active, the launching radar before.
+            ModuleRadar radar = !m.ActiveRadar && m.radarTarget.exists ? m.radarTarget.lockedByRadar : null;
+            Vector3 sensor = radar != null ? radar.transform.position : m.transform.position;
+            Vector3 los = (Vector3)tv.CoM - sensor;
+            range = los.magnitude;
+            radial = acrossLineOfSight ? 0f : Vector3.Dot(tv.Velocity(), los.normalized);
+            rcs = 0f;
+            if (Resolved(m, tv) || m.HomingOnJam) return 0f;
+            rcs = SkinRcs(ti, sensor, range);
+            return StealthMath.ChaffPull(bundles, effectivity, Settings.CmFloor, radial, m.velocityGate, rcs);
+        }
+
+        /// <summary>
+        /// Smart seekers: bundles tv has to release together now to take m's track (0: none can at this geometry), and whether it would
+        /// only be re-cued by its launcher's lock. acrossLineOfSight: the count if tv were flying exactly across the tracking sensor's
+        /// line of sight instead of as it is.
+        /// </summary>
+        internal static int SmartBundlesNeeded(MissileBase m, Vessel tv, out bool recued, bool acrossLineOfSight = false)
+        {
+            recued = false;
+            if (!Settings.Enabled || !Settings.ChaffSeduction || m == null || tv == null || Resolved(m, tv) || m.HomingOnJam) return 0;
+            float eff = m.chaffEffectivity;
+            ModuleRadar radar = !m.ActiveRadar && m.radarTarget.exists ? m.radarTarget.lockedByRadar : null;
+            if (radar != null) eff *= radar.radarChaffClutterFactor;
+            TargetInfo info = m.radarTarget.exists ? m.radarTarget.targetInfo : tv.gameObject.GetComponent<TargetInfo>();
+            float gathered = tracks.TryGetValue(m, out Track held) && held.Target == tv ? StealthMath.PullAfter(held.Pull, Time.time - held.PullTime) : 0f;
+            recued = Recued(m, tv);
+            return StealthMath.ChaffBundlesNeeded(gathered, SmartPull(m, tv, info, 1, eff, out _, out _, out _, acrossLineOfSight));
+        }
+
+        /// <summary>Smart seekers: whether m is close enough to tv (MissileBase.resolveRange) to tell the craft from a chaff bloom beside it.</summary>
+        internal static bool Resolved(MissileBase m, Vessel tv) =>
+            m.resolveRange > 0f && m.vessel != null && ((Vector3)tv.CoM - (Vector3)m.vessel.CoM).sqrMagnitude < m.resolveRange * m.resolveRange;
+
+        /// <summary>Smart seekers: whether m's track of its target is held by its own seeker (else by the radar that launched it).</summary>
+        internal static bool TrackedByOwnSeeker(MissileBase m) => m.ActiveRadar || !m.radarTarget.exists || m.radarTarget.lockedByRadar == null;
+
+        /// <summary>Whether the radar that launched m still holds its own lock on tv, to put the missile back on it over a data link.</summary>
+        static bool Recued(MissileBase m, Vessel tv)
+        {
+            if (!m.datalink || !m.ActiveRadar) return false; // Before it goes active the launcher's lock is the track being pulled.
+            return m.SupportingLock(tv, out _);
+        }
+
+        /// <summary>
+        /// Smart seekers: fresh bundles add their pull to what the track has gathered; at 1 the track goes to the bloom, for as long as the
+        /// margin holds it. Nothing is rolled: the same release in the same geometry against the same seeker always ends the same way.
+        /// </summary>
+        static void Gather(MissileBase m, Vessel tv, TargetInfo ti, Bloom b, Track t, int bundles, float effectivity, float now)
+        {
+            float added = SmartPull(m, tv, ti, bundles, effectivity, out float radial, out float rcs, out float range);
+            t.Pull = StealthMath.PullAfter(t.Pull, now - t.PullTime) + added;
+            t.PullTime = now;
+            if (t.Pull < 1f || now < t.Until) return;
+            bool recued = Recued(m, tv);
+            t.From = b.Time; t.Geo = b.Geo; t.Velocity = b.Velocity; t.Body = b.Body;
+            t.Until = now + StealthMath.ChaffHold(t.Pull, recued);
+            Seductions++;
+            m.RecordShotDecoy();
+            if (recued) m.RecordShotSupport(true);
+            Debug.Log($"[BDAStealth] Chaff: {m.shortName} seduced off {tv.vesselName} for {t.Until - now:0.0} s (pull {t.Pull:0.00}, radial speed {radial:0} m/s, gate {m.velocityGate:0} m/s, RCS {rcs:0.##} m², range {range:0} m{(recued ? ", re-cued by data link" : "")})");
+            if (Notify.Involves(m.SourceVessel, tv)) Notify.Post(recued ? $"{m.shortName} · chaff · re-cued · {tv.vesselName}" : $"{m.shortName} · chaff · {tv.vesselName}");
+            t.Pull = 0f;
+        }
+
         static void Roll(MissileBase m, Vessel tv, TargetInfo ti, Bloom b, Track t, int bundles, float effectivity, float now)
         {
+            if (m.smartSeeker) { Gather(m, tv, ti, b, t, bundles, effectivity, now); return; }
             float p = Chance(tv, ti, m.transform.position, effectivity, out float beam, out float rcs, out float range);
             for (int i = 0; i < bundles; i++)
             {
@@ -162,6 +244,7 @@ namespace BDAStealth
                 t.From = b.Time; t.Geo = b.Geo; t.Velocity = b.Velocity; t.Body = b.Body;
                 t.Until = now + Random.Range(1.5f, 3.5f);
                 Seductions++;
+                m.RecordShotDecoy();
                 Debug.Log($"[BDAStealth] Chaff: {m.shortName} seduced off {tv.vesselName} for {t.Until - now:0.0} s (chance {100f * p:0}%, doppler overlap {beam:0.00}, RCS {rcs:0.##} m², range {range:0} m)");
                 if (Notify.Involves(m.SourceVessel, tv)) Notify.Post($"{m.shortName} · chaff · {tv.vesselName}");
                 return;

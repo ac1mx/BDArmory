@@ -256,6 +256,7 @@ namespace BDArmory.Radar
             CleanPings();
             CleanMissileLocks();
             CleanLaunchWarnings();
+            CleanEmitters();
 
             if (!omniDetection || !rwrEnabled || !performMWSCheck || (Time.time < TimeOfNextMWSUpdate)) return;
 
@@ -511,6 +512,7 @@ namespace BDArmory.Radar
                     if (BDArmorySettings.DEBUG_RADAR) Debug.Log($"[BDArmory.RadarWarningReceiver] Missile Launch Warning buffer full! Unable to add missile: {(vSource ? vSource.GetDisplayName() : "null")}");
                 }
                 PlayWarningSound(RWRThreatTypes.MissileLaunch);
+                if (rwrEnabled) NoteLaunch(source, vSource);
 
                 if (weaponManager.guardMode)
                 {
@@ -537,6 +539,7 @@ namespace BDArmory.Radar
             }
 
             UpdateReferenceTransform();
+            NoteEmitter(source, type, vSource);
 
             if (type == RWRThreatTypes.MissileLaunch || type == RWRThreatTypes.Torpedo)
             {

@@ -4423,6 +4423,11 @@ namespace BDArmory.Control
                         dive = false;
                         notch = false;
                         breakDirection = MissileKinematicEvasion(breakDirection, threatDirection);
+                        if (kinematicEvasionState == KinematicEvasionStates.TurnAway)
+                        {
+                            if (runMasked) { ++maskTicks; NoteTactic("Terrain mask"); }
+                            else if (runDragging) { ++dragTicks; NoteTactic("Drag"); }
+                        }
                         if (kinematicEvasionState == KinematicEvasionStates.NotchDive)
                         {
                             notch = true;
@@ -4460,7 +4465,8 @@ namespace BDArmory.Control
                     {
                         Vector3 radarDir;
                         // If in space or not SARH (note that no radarTarget.exists check is made, but this *should* be fine)
-                        if (!BDArmorySettings.RADAR_NOTCHING || inVacuum || missileThreatMB.TargetingMode != MissileBase.TargetingModes.Radar || !missileThreatMB.vrd || !missileThreatMB.radarTarget.lockedByRadar)
+                        if (!BDArmorySettings.RADAR_NOTCHING || inVacuum || missileThreatMB.TargetingMode != MissileBase.TargetingModes.Radar || !missileThreatMB.vrd || !missileThreatMB.radarTarget.lockedByRadar
+                            || (missileThreatMB.smartSeeker && BDAStealth.ChaffPatches.TrackedByOwnSeeker(missileThreatMB)))
                         {
                             radarDir = VectorUtils.NormalizedDiff(missileThreat.CoM, vessel.CoM); // Use missile dir
                         }
@@ -4471,8 +4477,10 @@ namespace BDArmory.Control
 
                         if (!inVacuum)
                         {
-                            emergencyNotch = emergencyNotch && weaponManager.isChaffing;
-                            if (evasionMissileEmergencyNotchVel > 0 && weaponManager.isChaffing && (emergencyNotch || Mathf.Abs(Vector3.Dot(vesselVel, radarDir)) > evasionMissileEmergencyNotchVel))
+                            // Chaff in the air, or chaff that will only work once we are across the line of sight.
+                            bool chaffNeedsNotch = weaponManager.isChaffing || weaponManager.ChaffWantsBeam;
+                            emergencyNotch = emergencyNotch && chaffNeedsNotch;
+                            if (evasionMissileEmergencyNotchVel > 0 && chaffNeedsNotch && (emergencyNotch || Mathf.Abs(Vector3.Dot(vesselVel, radarDir)) > evasionMissileEmergencyNotchVel))
                             {
                                 emergencyNotch = true;
                                 // Emergency notch, get us notched ASAP!
@@ -4487,6 +4495,23 @@ namespace BDArmory.Control
                                 //breakDirection = NotchDir(breakDirection, radarDir, dive ? diveAngle : 0f);
                                 const float halfPi = Mathf.PI * 0.5f;
                                 breakDirection = VectorUtils.ConePlaneIntercept(breakDirection, radarDir, -vessel.up, (dive ? (halfPi - diveAngle) : halfPi));
+                                // Two radar missiles from different bearings: only the line across both keeps us on the beam of each,
+                                // which is steeply down (or up, when there's no height to give).
+                                if (engagementPlanner && NewAwareness && weaponManager.SecondRadarThreat(missileThreat, radarDir, out Vector3 secondDir))
+                                {
+                                    Vector3 across = Vector3.Cross(radarDir, secondDir).normalized;
+                                    bool low = vessel.radarAltitude - minAltitude < 1000f;
+                                    if (Vector3.Dot(across, low ? upDirection : -upDirection) < 0f) across = -across;
+                                    // No steeper than the height in hand allows (as for the single notch's dive), and never a steep climb.
+                                    float steepest = low ? 20f : Mathf.Clamp01(((float)vessel.radarAltitude - minAltitude) / Mathf.Max(1000f, 2f * turnRadius)) * 75f;
+                                    Vector3 level = across.ProjectOnPlanePreNormalized(upDirection);
+                                    if (level.sqrMagnitude < 1e-4f) level = breakDirection.ProjectOnPlanePreNormalized(upDirection);
+                                    across = Vector3.RotateTowards(level.normalized, across, steepest * Mathf.Deg2Rad, 0f);
+                                    breakDirection = across;
+                                    kinematicEvasionStatus = " (Double notch)";
+                                    ++planDoubleNotchTicks;
+                                    NoteTactic("Double notch");
+                                }
                             }
                         }
                         else
@@ -5067,6 +5092,7 @@ namespace BDArmory.Control
                     break;
                 case KinematicEvasionStates.TurnAway: // Turn 180 deg from missile
                     breakDirection = (-1f * threatDirection).ProjectOnPlanePreNormalized(upDirection).normalized;
+                    breakDirection = DragOrMask(breakDirection);
                     break;
                 default: // Notch, no change in breakDirection
                     {

@@ -28,7 +28,9 @@ namespace BDAStealth
         {
             public readonly Dictionary<int, float> Rolled = new Dictionary<int, float>();   // flare instance id -> time of its roll
             public CMFlare Captured;
+            public float CapturedAt;
             public float Fatigue, FatigueTime;   // recently rejected flares (see StealthMath.FlareFatigue)
+            public float Pull, PullTime;         // smart seekers: pull gathered from flares in the track gate (StealthMath.FlarePullRate)
         }
         static readonly ConditionalWeakTable<Vessel, SeekerState> seekerStates = new ConditionalWeakTable<Vessel, SeekerState>();
         /// <summary>Flares are pooled: an object is reused no sooner than 16 s after it was lit, and burns for 5 s. A roll older than this belongs to an earlier flare.</summary>
@@ -53,10 +55,44 @@ namespace BDAStealth
             if (seekerStates.TryGetValue(seeker.vessel, out SeekerState st))
             {
                 captured = st.Captured != null;
-                fatigue = StealthMath.FlareFatigue(st.Fatigue, Time.time - st.FatigueTime);
+                fatigue = seeker.smartSeeker ? 0f : StealthMath.FlareFatigue(st.Fatigue, Time.time - st.FatigueTime);
+            }
+            if (seeker.smartSeeker)
+            {
+                // No roll to quote: flares are worth releasing while the seeker is too far out to tell the craft's shape, and nothing inside that.
+                Vessel tracked = seeker.targetVessel != null ? seeker.targetVessel.Vessel : null;
+                bool resolved = tracked != null && seeker.resolveRange > 0f && (tracked.CoM - seeker.vessel.CoM).sqrMagnitude < seeker.resolveRange * seeker.resolveRange;
+                return resolved ? 0f : 0.5f;
             }
             return StealthMath.FlareCapture(1f, Settings.FlareChance, seeker.flareEffectivity, Settings.CmFloor);
         }
+
+        /// <summary>
+        /// Smart seekers: whether flares released by craft now can take the seeker's track (the brightest a flare ignites, over the heat
+        /// the seeker sees of the craft from where it is, passes what the seeker rejects, and the seeker is not close enough to tell the
+        /// craft's shape), and how long such a flare has to stay in the track gate.
+        /// </summary>
+        internal static bool SmartFlareWorth(MissileBase seeker, Vessel craft, out float dwell)
+        {
+            dwell = float.PositiveInfinity;
+            if (seeker == null || seeker.vessel == null || craft == null) return false;
+            if (seeker.resolveRange > 0f && (craft.CoM - seeker.vessel.CoM).sqrMagnitude < seeker.resolveRange * seeker.resolveRange) return false;
+            float own = BDATargetManager.GetVesselHeatSignature(craft, Vector3.zero).Item1; // What its flares are lit to match (CMFlare.SetThermal).
+            float seen = BDArmorySettings.ASPECTED_IR_SEEKERS ? BDATargetManager.GetVesselHeatSignature(craft, seeker.vessel.CoM, seeker.frontAspectHeatModifier).Item1 : own;
+            if (!(own > 0f) || !(seen > 0f)) return false;
+            float brightest = Mathf.Max(BDArmorySettings.FLARE_FACTOR, 0.8f) * own / seen; // The top of the range flares ignite in.
+            float rate = StealthMath.FlarePullRate(brightest, seeker.flareRejection, seeker.flareEffectivity, Settings.CmFloor);
+            if (rate > 0f) { dwell = 1f / rate; return true; }
+            // Flares lit now keep the heat the craft has now; the craft sheds its engines' share once the pilot pulls them back, which he
+            // does while flares are going out (BDModulePilotAI evasion). Worth it if they outshine what is left: the skin.
+            float skin = 0f;
+            foreach (var part in craft.Parts) if (part != null) skin = Mathf.Max(skin, (float)part.skinTemperature);
+            rate = StealthMath.FlarePullRate(brightest * own / Mathf.Clamp(skin, 1f, own), seeker.flareRejection, seeker.flareEffectivity, Settings.CmFloor);
+            if (!(rate > 0f)) return false;
+            dwell = 1f / rate + EngineCoolTime;
+            return true;
+        }
+        const float EngineCoolTime = 1f; // Allowance (s) for the engines to spool down before the craft is at its skin heat.
 
         internal static void HeatPrefix(Vessel missileVessel)
         {
@@ -120,6 +156,39 @@ namespace BDAStealth
             float prior = Mathf.Max(heatTarget.signalStrength, 1e-3f), now = Time.time, pickHeat = 0f;
             CMFlare held = st.Captured, pick = null;
             Vector3 down = -VectorUtils.GetUpDirection(ray.origin);
+            // Smart seekers: only a flare inside the track gate around the craft competes, by how much brighter it looks than the seeker
+            // rejects and for how long it stays there; inside the range at which the seeker tells the craft's shape, none does.
+            bool smart = ctxSeeker != null && ctxSeeker.smartSeeker;
+            Vector3 toTracked = heatTarget.position - ray.origin;
+            bool resolved = smart && ctxSeeker.resolveRange > 0f && heatTarget.vessel != null && toTracked.sqrMagnitude < ctxSeeker.resolveRange * ctxSeeker.resolveRange;
+            CMFlare brightest = null;
+            float brightestRate = 0f, brightestHeat = 0f;
+            // A smart seeker following a flare goes back to the craft it was launched at, if that is still in view, once the craft
+            // outshines the flare or is close and near where the seeker is looking (StealthMath.FlareReleased): a flare buys the time
+            // it takes to get away from it.
+            if (smart && held != null && held && ctxSeeker.targetVessel != null && ctxSeeker.targetVessel.Vessel != null)
+            {
+                Vessel craft = ctxSeeker.targetVessel.Vessel;
+                Vector3 toCraft = craft.CoM - ray.origin, toFlare = held.transform.position - ray.origin;
+                if (VectorUtils.Angle(toCraft, ray.direction) < scanRadius)
+                {
+                    float craftHeat = BDATargetManager.GetVesselHeatSignature(craft, BDArmorySettings.ASPECTED_IR_SEEKERS ? ctxMissile.CoM : Vector3.zero, ctxSeeker.frontAspectHeatModifier).Item1
+                        * 1960000f / Mathf.Max(toCraft.sqrMagnitude, 90000f) * Mathf.Clamp(VectorUtils.Angle(toCraft, down) / 90f, 0.5f, 1.5f);
+                    float flareHeat = held.thermal * 1960000f / Mathf.Clamp(toFlare.sqrMagnitude, 90000f, 36000000f) * Mathf.Clamp(VectorUtils.Angle(toFlare, down) / 90f, 0.5f, 1.5f);
+                    bool close = ctxSeeker.resolveRange > 0f && toCraft.sqrMagnitude < ctxSeeker.resolveRange * ctxSeeker.resolveRange;
+                    if (StealthMath.FlareReleased(craftHeat, flareHeat * ctxFlareResistance, ctxSeeker.flareRejection, close, VectorUtils.Angle(toCraft, toFlare), ctxSeeker.trackGate, now - st.CapturedAt))
+                    {
+                        if (BDArmory.Control.BDModulePilotAI.steeringMetricsEnabled)
+                        {
+                            float off = VectorUtils.Angle(toCraft, toFlare);
+                            string reason = craftHeat >= Mathf.Max(ctxSeeker.flareRejection, 1f) * flareHeat * ctxFlareResistance ? "heat" : close && off < 4f * ctxSeeker.trackGate ? "resolved" : "motion";
+                            Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture, "[BDAStealth] FlareRelease missile={0} reason={1} held={2:F2} craftHeat={3:F0} flareHeat={4:F0} offDeg={5:F1} range={6:F0}",
+                                ctxMissile.vesselName, reason, now - st.CapturedAt, craftHeat, flareHeat * ctxFlareResistance, off, toCraft.magnitude));
+                        }
+                        held = null;
+                    }
+                }
+            }
             foreach (CMFlare flare in BDArmorySetup.Flares)
             {
                 if (!flare) continue;
@@ -134,6 +203,14 @@ namespace BDAStealth
                 thermal *= Mathf.Clamp(VectorUtils.Angle(to, down) / 90f, 0.5f, 1.5f);
                 if (!(thermal > 0f)) continue;
                 bool captured = flare == held;
+                if (smart)
+                {
+                    if (captured) { if (thermal > pickHeat) { pick = flare; pickHeat = thermal; } continue; }
+                    if (held != null || resolved || heatTarget.vessel == null || VectorUtils.Angle(to, toTracked) > ctxSeeker.trackGate) continue;
+                    float rate = StealthMath.FlarePullRate(thermal / prior, ctxSeeker.flareRejection, ctxFlareResistance, Settings.CmFloor);
+                    if (rate > brightestRate) { brightest = flare; brightestRate = rate; brightestHeat = thermal; }
+                    continue;
+                }
                 if (!captured)
                 {
                     int id = flare.GetInstanceID();
@@ -147,6 +224,7 @@ namespace BDAStealth
                         if (captured)
                         {
                             FlareCaptures++;
+                            if (ctxSeeker != null) ctxSeeker.RecordShotDecoy();
                             Debug.Log($"[BDAStealth] Flare: {ctxMissile.vesselName} decoyed (chance {100f * chance:0}%, flare {thermal:0} vs tracked {prior:0}, sensitivity ×{ctxFlareResistance:0.##}, fatigue {fatigue:0.0})");
                             if (ctxSeeker != null && ctxSeeker.HasFired && Notify.Involves(ctxSeeker.SourceVessel, heatTarget.vessel))
                                 Notify.Post(heatTarget.vessel != null ? $"{ctxSeeker.shortName} · flare · {heatTarget.vessel.vesselName}" : $"{ctxSeeker.shortName} · flare");
@@ -156,6 +234,24 @@ namespace BDAStealth
                 }
                 if (captured && thermal > pickHeat) { pick = flare; pickHeat = thermal; }
             }
+            if (smart && pick == null)
+            {
+                st.Pull = StealthMath.PullAfter(st.Pull, now - st.PullTime) + brightestRate * Time.fixedDeltaTime;
+                st.PullTime = now;
+                if (brightest != null && st.Pull >= 1f)
+                {
+                    pick = brightest; pickHeat = brightestHeat;
+                    st.Pull = 0f;
+                    FlareCaptures++;
+                    ctxSeeker.RecordShotDecoy();
+                    Debug.Log($"[BDAStealth] Flare: {ctxMissile.vesselName} decoyed (flare {brightestHeat:0} vs tracked {prior:0}, rejection ×{ctxSeeker.flareRejection:0.##}, sensitivity ×{ctxFlareResistance:0.##}, gate {ctxSeeker.trackGate:0.#}°, range {toTracked.magnitude:0} m)");
+                    if (ctxSeeker.HasFired && Notify.Involves(ctxSeeker.SourceVessel, heatTarget.vessel))
+                        Notify.Post($"{ctxSeeker.shortName} · flare · {heatTarget.vessel.vesselName}");
+                }
+            }
+            if (smart && st.Captured != null && pick == null && held != null && BDArmory.Control.BDModulePilotAI.steeringMetricsEnabled)
+                Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture, "[BDAStealth] FlareRelease missile={0} reason={1} held={2:F2}", ctxMissile.vesselName, held ? "outOfView" : "burntOut", now - st.CapturedAt));
+            if (pick != st.Captured) st.CapturedAt = now;
             st.Captured = pick;
             pendingFlare = pick; pendingThermal = pickHeat;
             // Stock sees no flare; HeatPostfix hands the seeker the capturing flare, so the outcome does not depend on

@@ -16,6 +16,15 @@ param(
     [switch]$Teams,
     [switch]$Patrol, # Craft with nothing to fight patrol random points near the spawn point (use with a large -SpawnDistance).
     [switch]$FlightRecorder,
+    [string]$PatchFile = "",  # ModuleManager patch placed in GameData for this run only.
+    [string]$ShotModel = "",  # Shot model weights (fit_shot_model.py --out) flown for this run only in place of the installed ones.
+    [string]$SmartCraft = "", # Missiles launched by craft whose name contains this word fly as smart seekers, all others as stock ones.
+    [string]$AdvancedCraft = "", # Only missiles launched by craft whose name contains this word use their homing law, motor mode, midcourse and salvo behaviour.
+    [string]$AwarenessCraft = "", # Only pilots of craft whose name contains this word use the warning-receiver picture, no-escape shot, lofted launch, double notch, drag and masking.
+    [int]$StopAfterShots = 0, # Stop once this many shot results are logged (per word in -ArmWords, when given) instead of flying out -Duration.
+    [string]$ArmWords = "",     # Craft-name words that tell the arms of a comparison apart, comma-separated (e.g. "Red,Blue").
+    [string]$Expect = "",       # Log patterns, separated by ";", that must each have a match once the first ten shots are in; the run is stopped if one hasn't.
+    [string]$BdaSettings = "",  # Extra BDArmory settings for the run, "KEY=value;KEY=value" (e.g. DEBUG_SPAWNING=True).
     [string]$Ksp = "D:\BDArmory KSP Save\KerbalSpaceProgram\English",
     [string]$Dll = "$PSScriptRoot\..\..\BDArmory\bin\Release\BDArmory.dll"
 )
@@ -23,6 +32,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\..\harness.ps1"
 $out = Join-Path $OutRoot $Tag
 if (Get-Process KSP_x64 -ErrorAction SilentlyContinue) { "KSP is running; not starting"; exit 1 }
+if (-not (Restore-Pending $Ksp)) { "an interrupted run's files could not be restored; not starting"; exit 1 }
 New-Item -ItemType Directory -Force $out | Out-Null
 $perf = "$Ksp\GameData\BDAPerf\PluginData\BDAPerf.cfg"
 $pluginData = "$Ksp\GameData\BDArmory\PluginData"
@@ -42,24 +52,26 @@ Set-HarnessGameSettings $Ksp @{
     VESSEL_SPAWN_DISTANCE_TOGGLE = "True"; VESSEL_SPAWN_INITIAL_VELOCITY = "True"; COMPETITION_START_NOW_AFTER = "1"; COMPETITION_DISTANCE = "$SpawnDistance"
     VIP_DEATH_ENDS_ROUND = "False"
 }
+if ($BdaSettings) { $extra = @{}; $BdaSettings -split ';' | Where-Object { $_ } | ForEach-Object { $k, $v = $_ -split '=', 2; $extra[$k.Trim()] = $v.Trim() }; Set-HarnessGameSettings $Ksp $extra }
 $flags = @("$pluginData\steering_metrics.on")
 if (-not $NoFairRounds) { $flags += "$pluginData\duel_rounds.on" }
 if ($BvrOnly) { $flags += "$pluginData\duel_bvr.on" } # Rounds end as draws once both craft have spent their air-to-air missiles.
 if ($Teams) { $flags += "$pluginData\test_teams.on" }
 if ($Patrol) { $flags += "$pluginData\test_patrol.on" }
+if ($SmartCraft) { $flags += "$pluginData\test_smart_seekers.on" }
+if ($AdvancedCraft) { $flags += "$pluginData\test_advanced_missiles.on" }
+if ($AwarenessCraft) { $flags += "$pluginData\test_pilot_awareness.on" }
+$variantPatch = "$Ksp\GameData\Custom\Patches\zzFightVariants.cfg"
+Add-HarnessCleanup ($flags + $variantPatch)
 foreach ($f in $flags) { Set-Content $f "" }
+if ($SmartCraft) { Set-Content "$pluginData\test_smart_seekers.on" $SmartCraft }
+if ($AdvancedCraft) { Set-Content "$pluginData\test_advanced_missiles.on" $AdvancedCraft }
+if ($AwarenessCraft) { Set-Content "$pluginData\test_pilot_awareness.on" $AwarenessCraft }
+if ($PatchFile) { Copy-Item $PatchFile $variantPatch -Force }
+if ($ShotModel) { Copy-Item $ShotModel "$pluginData\shot_model.cfg" -Force } # Backed up (or marked for removal) with the other game files.
 try {
     $p = Start-Process "$Ksp\KSP_x64.exe" -WorkingDirectory $Ksp -PassThru
-    # Quit watchdog: KSP can hang tearing down the flight scene (missiles detonating as their parts are destroyed), so a KSP still
-    # running 90 s after BDAPerf logged its quit is stopped. It is this run's own process, by handle.
-    $deadline = (Get-Date).AddSeconds($Duration + 900); $quitSeen = $null; $fightEnd = (Get-Date).AddSeconds($Duration)
-    while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
-        if ($p.WaitForExit(15000)) { break }
-        if ((Get-Date) -lt $fightEnd) { continue }
-        if (-not $quitSeen -and (Select-String -Path "$Ksp\KSP.log" -Pattern 'Benchmark done, quitting' -SimpleMatch -Quiet)) { $quitSeen = Get-Date }
-        if ($quitSeen -and ((Get-Date) - $quitSeen).TotalSeconds -gt 90) { "KSP hung after quitting; stopping it"; $p.Kill(); $p.WaitForExit(30000) | Out-Null; break }
-    }
-    if (-not $p.HasExited) { "KSP did not exit by itself within the limit; left running" }
+    Wait-HarnessRun $p $Ksp $Duration $StopAfterShots @($ArmWords -split ',' | Where-Object { $_ }) @($Expect -split ';' | Where-Object { $_ })
 }
 finally {
     # A KSP stopped from outside (an obsolete run torn down) can still be exiting when its handle reports exit.
@@ -67,7 +79,6 @@ finally {
     while ((Get-Process KSP_x64 -ErrorAction SilentlyContinue) -and (Get-Date) -lt $exitWait) { Start-Sleep 2 }
     if (-not (Get-Process KSP_x64 -ErrorAction SilentlyContinue)) {
         Restore-GameFiles $out
-        Remove-Item $flags -Force -ErrorAction SilentlyContinue
         # Flight recordings written by this run only (the recorder is on while steering_metrics.on exists).
         $recordings = Get-ChildItem "$Ksp\GameData\BDArmory\Logs" -Filter "flightdata-*.csv" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $p.StartTime }
         if ($FlightRecorder) { New-Item -ItemType Directory -Force "$out\flightdata" | Out-Null; $recordings | Move-Item -Destination "$out\flightdata\" -Force }

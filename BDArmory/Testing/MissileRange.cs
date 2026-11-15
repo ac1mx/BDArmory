@@ -30,10 +30,10 @@ namespace BDArmory.Testing
         const string ShooterTeam = "Shooters", TargetTeam = "Targets";
 
         readonly List<string> missiles = new List<string>();
-        int pairs = 4, trials = 0, seed = 1;
+        int pairs = 4, trials = 0, seed = 1, repeatGeometry = 1;
         float straightFraction = 0.2f, stationLatitude = 1f, stationLongitude = -64f, pairSpacing = 15000f;
         float minAltitude = 1500f, maxAltitude = 12000f, minSpeed = 200f, maxSpeed = 420f;
-        float maxRange = 90000f, heatMaxRange = 30000f, hobsFraction = 0.3f;
+        float minRange = 0f, maxRange = 90000f, heatMaxRange = 30000f, hobsFraction = 0.3f;
         float lockTimeout = 3f, settleTime = 1.5f, maxFlightTime = 150f;
 
         System.Random random;
@@ -49,6 +49,7 @@ namespace BDArmory.Testing
             node.TryGetValue("pairs", ref pairs);
             node.TryGetValue("trials", ref trials);
             node.TryGetValue("seed", ref seed);
+            node.TryGetValue("repeatGeometry", ref repeatGeometry);
             node.TryGetValue("straightFraction", ref straightFraction);
             node.TryGetValue("stationLatitude", ref stationLatitude);
             node.TryGetValue("stationLongitude", ref stationLongitude);
@@ -58,6 +59,7 @@ namespace BDArmory.Testing
             node.TryGetValue("minSpeed", ref minSpeed);
             node.TryGetValue("maxSpeed", ref maxSpeed);
             node.TryGetValue("maxRange", ref maxRange);
+            node.TryGetValue("minRange", ref minRange);
             node.TryGetValue("heatMaxRange", ref heatMaxRange);
             node.TryGetValue("hobsFraction", ref hobsFraction);
             node.TryGetValue("lockTimeout", ref lockTimeout);
@@ -124,7 +126,10 @@ namespace BDArmory.Testing
             if (!wm.guardMode) wm.ToggleGuardMode();
         }
 
-        /// <summary>Every resource back to full (fuel, flares, chaff, ammunition): each trial is flown by a fresh aircraft.</summary>
+        /// <summary>
+        /// Every resource back to full (fuel, ammunition): each trial is flown by a fresh aircraft. Countermeasure dispensers keep their
+        /// own count, which this does not reach: range runs fly with BDArmory's infinite countermeasures setting on (run_range.ps1).
+        /// </summary>
         static void Refill(Vessel v)
         {
             foreach (var part in v.parts)
@@ -136,7 +141,7 @@ namespace BDArmory.Testing
         #region Trial geometry
         class Trial
         {
-            public int id, pair;
+            public int id, pair, geometry;
             public string missile, targetMode;
             public float range, aspect, offBoresight, shooterAltitude, targetAltitude, shooterSpeed, targetSpeed;
             public bool heat;
@@ -149,13 +154,26 @@ namespace BDArmory.Testing
         float LogUniform(float min, float max) => Mathf.Exp(Uniform(Mathf.Log(min), Mathf.Log(max)));
         float Sign() => random.NextDouble() < 0.5 ? -1f : 1f;
 
+        Trial lastDrawn;
+
         Trial DrawTrial(int pair)
         {
             var trial = new Trial { id = ++trialsStarted, pair = pair + 1 };
             trial.missile = missiles[(trial.id - 1) % missiles.Count];
+            // The same launch geometry for repeatGeometry trials in a row: missile variants compared shot for shot, or one missile's
+            // spread of outcomes from the same shot.
+            if (repeatGeometry > 1 && lastDrawn != null && (trial.id - 1) % repeatGeometry != 0)
+            {
+                trial.geometry = lastDrawn.geometry; trial.heat = lastDrawn.heat; trial.range = lastDrawn.range; trial.aspect = lastDrawn.aspect;
+                trial.offBoresight = lastDrawn.offBoresight; trial.shooterAltitude = lastDrawn.shooterAltitude; trial.targetAltitude = lastDrawn.targetAltitude;
+                trial.shooterSpeed = lastDrawn.shooterSpeed; trial.targetSpeed = lastDrawn.targetSpeed; trial.targetMode = lastDrawn.targetMode;
+                return trial;
+            }
+            trial.geometry = lastDrawn != null ? lastDrawn.geometry + 1 : 1;
+            lastDrawn = trial;
             var prefab = PartLoader.getPartInfoByName(trial.missile).partPrefab.FindModuleImplementing<MissileLauncher>();
             trial.heat = string.Equals(prefab.targetingType, "heat", StringComparison.OrdinalIgnoreCase);
-            float rMin = Mathf.Max(500f, 1.1f * prefab.minStaticLaunchRange);
+            float rMin = Mathf.Max(500f, 1.1f * prefab.minStaticLaunchRange, minRange);
             // The launch zone adds closing speed × flight time to the static range: up to ~1.6× head-on.
             float rMax = Mathf.Min(maxRange, 1.8f * prefab.maxStaticLaunchRange, trial.heat ? heatMaxRange : float.MaxValue);
             if (rMax < 2f * rMin) rMax = 2f * rMin;
@@ -257,7 +275,7 @@ namespace BDArmory.Testing
                 }
                 var missile = SpawnMissile(shooter, trial.missile);
                 if (missile == null) { LogTrial(trial, "Failed", "spawn", 0f, shooter, target); continue; }
-                missile.shotContext = $"trial={trial.id} pair={trial.pair} targetMode={trial.targetMode} harness=range";
+                missile.shotContext = $"trial={trial.id} pair={trial.pair} geometry={trial.geometry} targetMode={trial.targetMode} harness=range";
                 MissileFire.TestLaunchResult result = MissileFire.TestLaunchResult.Failed;
                 string reason = null;
                 bool finished = false;

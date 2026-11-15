@@ -169,6 +169,97 @@ namespace BDArmory.Weapons.Missiles
         public float flareEffectivity = 1f;                            // Modifies how the missile targeting is affected by flares, 1 is fully affected (normal behavior), lower values mean less affected (0 is ignores flares), higher values means more affected
 
         [KSPField]
+        public bool smartSeeker = false;                              // Decoys take the track by the geometry and signatures in play (SeekerTrack) instead of chance rolls and aim point scatter.
+
+        [KSPField]
+        public float flareRejection = 1f;                              // smartSeeker: how many times brighter than the tracked craft a flare inside the track gate has to look to start pulling the seeker.
+
+        [KSPField]
+        public float trackGate = 2.5f;                                 // smartSeeker: half-angle (deg) around the tracked craft inside which a flare competes with it.
+
+        [KSPField]
+        public float resolveRange = 0f;                               // smartSeeker: inside this range (m) the seeker tells the craft from a decoy beside it and ignores flares (heat) or chaff (radar) (0: never).
+
+        [KSPField]
+        public float velocityGate = 50f;                               // smartSeeker: chaff competes with the craft only while the craft's speed along the line of sight is within this (m/s).
+
+        [KSPField]
+        public bool datalink = false;                                  // smartSeeker: while the launching radar still holds its lock, it puts a decoyed missile back on the craft.
+
+        [KSPField]
+        public string guidanceLaw = "";                                // Homing law once guiding on an air target: pronav, optimal, game or sliding (empty: the one the homingType gives).
+
+        [KSPField]
+        public string motorMode = "";                                  // How the sustainer (cruise stage) is spent: pulse (held, lit to burn out at the intercept) or throttle (spread over the flight); empty: straight after the booster.
+
+        [KSPField]
+        public float minThrottle = 0.3f;                               // motorMode throttle: lowest throttle.
+
+        [KSPField]
+        public bool energyMidcourse = false;                           // Far from the target the missile turns only as hard as costs it little speed, saving hard turns for the end.
+
+        [KSPField]
+        public bool inertialMidcourse = false;                         // Radar: with its guiding lock lost before its own seeker is on, it flies on to where the target was heading and searches there instead of giving up.
+
+        [KSPField]
+        public bool homeOnJam = false;                                 // smartSeeker radar: against a noise jammer it can't range, its own seeker homes on the jamming: silent, immune to chaff, but without range (plain proportional navigation, motor burnt at once).
+
+        [KSPField]
+        public bool salvoCoordination = false;                         // Fired at a craft another of the team's missiles is already flying at, it takes a different bearing so that one turn can't beam both.
+
+        /// <summary>The homing law and motor management in use (the part's, unless switched off for this launch).</summary>
+        public BDArmory.Guidances.GuidanceLaw Law { get; private set; }
+        public BDArmory.Guidances.MotorMode Motor { get; private set; }
+        /// <summary>Whether the part's advanced flight behaviour (law, motor, midcourse, coordination) applies to this launch.</summary>
+        public bool AdvancedFlight { get; private set; } = true;
+        /// <summary>Homing on a noise jammer's emission (no range to the target).</summary>
+        public bool HomingOnJam { get; internal set; }
+        /// <summary>Flying on to a dead-reckoned target position after the guiding lock was lost.</summary>
+        public bool InertialCoasting { get; protected set; }
+        protected float inertialCoastStart = -1f;
+        /// <summary>Sideways (unit vector) and how far (deg) this missile's approach is offset from the direct one, as one of a coordinated salvo.</summary>
+        public Vector3 salvoOffsetDirection;
+        public float salvoOffsetAngle;
+
+        static BDArmory.Guidances.GuidanceLaw ParseLaw(string name) => (name ?? "").Trim().ToLowerInvariant() switch
+        {
+            "pronav" => BDArmory.Guidances.GuidanceLaw.ProNav,
+            "optimal" => BDArmory.Guidances.GuidanceLaw.Optimal,
+            "game" => BDArmory.Guidances.GuidanceLaw.Game,
+            "sliding" => BDArmory.Guidances.GuidanceLaw.SlidingMode,
+            _ => BDArmory.Guidances.GuidanceLaw.Config
+        };
+        static BDArmory.Guidances.MotorMode ParseMotor(string name) => (name ?? "").Trim().ToLowerInvariant() switch
+        {
+            "pulse" => BDArmory.Guidances.MotorMode.Pulse,
+            "throttle" => BDArmory.Guidances.MotorMode.Throttle,
+            _ => BDArmory.Guidances.MotorMode.Sustain
+        };
+        bool advancedFlightParsed;
+        /// <summary>Read the law and motor names (once; again at launch, when the launching craft may switch them off for a comparison).</summary>
+        public void SetupAdvancedFlight()
+        {
+            advancedFlightParsed = true;
+            var craft = SourceVessel != null ? SourceVessel : vessel; // On the rail, the craft carrying it.
+            AdvancedFlight = string.IsNullOrEmpty(advancedTestCraft) || craft == null || craft.vesselName.Contains(advancedTestCraft);
+            Law = AdvancedFlight ? ParseLaw(guidanceLaw) : BDArmory.Guidances.GuidanceLaw.Config;
+            Motor = AdvancedFlight ? ParseMotor(motorMode) : BDArmory.Guidances.MotorMode.Sustain;
+        }
+        public void EnsureAdvancedFlight() { if (!advancedFlightParsed) SetupAdvancedFlight(); }
+        // Comparison in one fight, as for smart seekers: GameData/BDArmory/PluginData/test_advanced_missiles.on holds a word; only
+        // missiles launched by craft whose name contains it use their law, motor mode, midcourse and salvo behaviour.
+        static readonly string advancedTestCraft = ReadTestCraft("test_advanced_missiles.on");
+        static string ReadTestCraft(string file)
+        {
+            string path = System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/" + file);
+            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path).Trim() : null;
+        }
+
+        /// <summary>Where the radar track says the target is: with the stock chaff scatter, or the track itself for a smart seeker (chaff then acts through SeekerTrack only).</summary>
+        protected Vector3 RadarAimPoint(float chaffFactor, float notchV, float notchR) =>
+            smartSeeker ? radarTarget.predictedPosition : radarTarget.predictedPositionWithChaffFactor(chaffFactor, notchV, notchR);
+
+        [KSPField]
         public bool allAspect = false;                                 // DEPRECATED, replaced by uncagedIRLock. uncagedIRLock is automatically set to this value upon loading (to maintain compatability with old BDA mods)
 
         [KSPField]
@@ -1116,6 +1207,8 @@ namespace BDArmory.Weapons.Missiles
         MissileStates shotStateAtClosest;
         int shotTicks, shotDecoyTicks, shotNoTargetTicks;
         float shotFirstDecoyTime = -1f;
+        float shotAimError, shotAimErrorRecent, shotAimErrorAtClosest = -1f, shotAimErrorRecentAtClosest = -1f;
+        float shotTurnG, shotTurnGAtClosest, shotPeakTurnG, shotOffNoseAtClosest;
         bool shotLogged;
 
         /// <summary>Local east, north and up components of a world vector at the missile's position.</summary>
@@ -1127,8 +1220,20 @@ namespace BDArmory.Weapons.Missiles
             return new Vector3(Vector3.Dot(world, east), Vector3.Dot(world, north), Vector3.Dot(world, up));
         }
 
+        // Seeker comparison in one fight: GameData/BDArmory/PluginData/test_smart_seekers.on holds a word; missiles launched by craft
+        // whose name contains it fly as smart seekers, everyone else's as stock ones, whatever their parts say.
+        static readonly string smartSeekerTestCraft = ReadSmartSeekerTestCraft();
+        static string ReadSmartSeekerTestCraft()
+        {
+            string path = System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/test_smart_seekers.on");
+            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path).Trim() : null;
+        }
+
         protected void RecordShotLaunch()
         {
+            if (!string.IsNullOrEmpty(smartSeekerTestCraft) && SourceVessel != null) smartSeeker = SourceVessel.vesselName.Contains(smartSeekerTestCraft);
+            SetupAdvancedFlight();
+            AssignSalvoRole();
             if (!shotRecordEnabled || vessel == null) return;
             shotTarget = targetVessel != null ? targetVessel.Vessel : null;
             if (shotTarget == null) { shotLaunch = null; return; }
@@ -1164,14 +1269,26 @@ namespace BDArmory.Weapons.Missiles
             ++shotTicks;
             if (speed > shotMaxSpeed) shotMaxSpeed = speed;
             if (shotBurnoutTime < 0 && MissileState == MissileStates.PostThrust) { shotBurnoutTime = TimeIndex; shotBurnoutSpeed = speed; }
+            // How far the point being steered at is from the craft the missile was launched at, now and averaged over about the last second.
+            shotAimError = TargetAcquired ? (TargetPosition - shotTarget.CoM).magnitude : -1f;
+            if (shotAimError >= 0f) shotAimErrorRecent += (shotAimError - shotAimErrorRecent) * Mathf.Min(1f, Time.fixedDeltaTime);
+            // How hard it is turning (g across the flight path, averaged over about the last half second) and the hardest it has turned.
+            Vector3 flightPath = vessel.Velocity().normalized;
+            float turnG = ((Vector3)vessel.acceleration).ProjectOnPlanePreNormalized(flightPath).magnitude / (float)PhysicsGlobals.GravitationalAcceleration;
+            shotTurnG += (turnG - shotTurnG) * Mathf.Min(1f, 2f * Time.fixedDeltaTime);
+            if (shotTurnG > shotPeakTurnG) shotPeakTurnG = shotTurnG;
             if (!TargetAcquired) ++shotNoTargetTicks;
-            else if ((TargetPosition - shotTarget.CoM).sqrMagnitude > 150f * 150f) // Guiding on something other than the target: a decoy, or a lock gone stale.
+            else if (shotAimError > 150f) // Guiding on something other than the target: a decoy, or a lock gone stale.
             {
                 ++shotDecoyTicks;
                 if (shotFirstDecoyTime < 0) shotFirstDecoyTime = TimeIndex;
             }
             if (distance < shotMinDistance)
             {
+                shotAimErrorAtClosest = shotAimError;
+                shotAimErrorRecentAtClosest = shotAimErrorRecent;
+                shotTurnGAtClosest = shotTurnG;
+                shotOffNoseAtClosest = VectorUtils.Angle(flightPath, toTarget);
                 shotMinDistance = distance;
                 shotMinDistanceTime = TimeIndex;
                 shotSpeedAtClosest = speed;
@@ -1179,6 +1296,73 @@ namespace BDArmory.Weapons.Missiles
                 shotStateAtClosest = MissileState;
             }
         }
+
+        /// <summary>
+        /// A radar lock on a craft that can guide this missile from outside: the launching craft's, or with a data link (datalink) any
+        /// craft's on the launcher's team.
+        /// </summary>
+        internal bool SupportingLock(Vessel target, out TargetSignatureData track)
+        {
+            track = TargetSignatureData.noTarget;
+            supportFromWingman = false;
+            if (target == null) return false;
+            if (LockOn(FiredByWM, target, out track)) return true;
+            if (!datalink || Team == null) return false;
+            foreach (var v in BDATargetManager.LoadedVessels)
+            {
+                if (v == null || !v.loaded || v == SourceVessel || v == vessel) continue;
+                var wm = v.ActiveController().WM;
+                if (wm != null && wm != FiredByWM && wm.Team == Team && LockOn(wm, target, out track)) return supportFromWingman = true;
+            }
+            return false;
+        }
+        bool supportFromWingman; // The last supporting lock found was a teammate's, not the launcher's.
+
+        /// <summary>The missile flew a frame on a supporting lock (handBack), or was put back on its target after chaff by one (recue).</summary>
+        internal void RecordShotSupport(bool recue)
+        {
+            if (shotLaunch == null) return;
+            if (recue) ++shotRecues; else ++shotHandBackTicks;
+            if (supportFromWingman) ++shotWingmanSupports;
+        }
+        int shotHandBackTicks, shotRecues, shotWingmanSupports;
+        /// <summary>Counts for the shot record: frames homing on jamming, coasting inertially, flying the energy midcourse, the salvo offset and the homing law.</summary>
+        protected int shotHojTicks, shotInertialTicks, shotMidcourseTicks, shotOffsetTicks, shotLawTicks;
+        protected float shotSustainLitTime = -1f, shotSustainEndTime = -1f;
+        public string shotSalvoRole = "single";
+
+        static bool LockOn(MissileFire wm, Vessel target, out TargetSignatureData track)
+        {
+            track = TargetSignatureData.noTarget;
+            if (wm == null || wm.vesselRadarData == null || !wm.vesselRadarData.locked) return false;
+            bool locked;
+            (track, locked) = wm.vesselRadarData.detectedRadarTargetLock(target, wm);
+            return locked && track.exists;
+        }
+
+        /// <summary>Whether a tracked craft is still being flown and fought (has a weapon manager), as opposed to destroyed or wreckage.</summary>
+        static bool InTheFight(Vessel v, TargetInfo info) => v != null && v.state != Vessel.State.DEAD && v.vesselType != VesselType.Debris && info != null && info.WeaponManager != null;
+        bool trackedAFighter; // The target was in the fight at some point: an unarmed target is never abandoned for an armed one.
+
+        /// <summary>The missile switched to another craft: its shot record follows the new one from here.</summary>
+        void RecordShotRetarget(Vessel newTarget)
+        {
+            if (shotLaunch == null) return;
+            shotTarget = newTarget;
+            shotMinDistance = float.MaxValue;
+            ++shotRetargets;
+        }
+        int shotRetargets;
+
+        /// <summary>A decoy took this missile's track (chaff seduction or flare capture): counted on the missile for its shot record.</summary>
+        internal void RecordShotDecoy()
+        {
+            if (shotLaunch == null) return;
+            ++shotDecoys;
+            shotLastDecoyTime = TimeIndex;
+        }
+        int shotDecoys;
+        float shotLastDecoyTime = -1f;
 
         protected void RecordShotResult()
         {
@@ -1188,10 +1372,125 @@ namespace BDArmory.Weapons.Missiles
             float ticks = Mathf.Max(1, shotTicks);
             Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                 "[BDArmory.MissileBase]: MissileShot {0} minDistance={1:F0} blastRadius={2:F0} hit={3} timeToClosest={4:F1} flightTime={5:F1} endAlt={6:F0} targetDestroyed={7}"
-                + " speedAtClosest={8:F0} closingAtClosest={9:F0} stateAtClosest={10} burnoutTime={11:F1} burnoutSpeed={12:F0} maxSpeed={13:F0} decoyFraction={14:F2} firstDecoy={15:F1} noTargetFraction={16:F2} missReason={17}",
+                + " speedAtClosest={8:F0} closingAtClosest={9:F0} stateAtClosest={10} burnoutTime={11:F1} burnoutSpeed={12:F0} maxSpeed={13:F0} decoyFraction={14:F2} firstDecoy={15:F1} noTargetFraction={16:F2} missReason={17} aimError={18:F0} aimErrorRecent={19:F0} guidance={20} turnG={21:F1} peakTurnG={22:F1} offPathAtClosest={23:F0} smart={24} decoys={25} lastDecoy={26:F1} retargets={27} handBackTicks={28} recues={29} wingmanSupports={30}"
+                + " advanced={31} law={32} lawTime={33:F1} motor={34} sustainLit={35:F1} sustainEnd={36:F1} hojTime={37:F1} inertialTime={38:F1} midcourseTime={39:F1} salvoRole={40} offsetTime={41:F1}",
                 shotLaunch, shotMinDistance, GetBlastRadius(), shotMinDistance <= GetBlastRadius(), shotMinDistanceTime, TimeIndex, vessel != null ? vessel.radarAltitude : -1, targetGone,
                 shotSpeedAtClosest, shotClosingAtClosest, shotStateAtClosest, shotBurnoutTime, shotBurnoutSpeed, shotMaxSpeed, shotDecoyTicks / ticks, shotFirstDecoyTime, shotNoTargetTicks / ticks,
-                string.IsNullOrEmpty(missReason) ? "none" : missReason));
+                string.IsNullOrEmpty(missReason) ? "none" : missReason, shotAimErrorAtClosest, shotAimErrorRecentAtClosest, GuidanceMode, shotTurnGAtClosest, shotPeakTurnG, shotOffNoseAtClosest, smartSeeker, shotDecoys, shotLastDecoyTime, shotRetargets, shotHandBackTicks, shotRecues, shotWingmanSupports,
+                AdvancedFlight, Law, shotLawTicks * Time.fixedDeltaTime, Motor, shotSustainLitTime, shotSustainEndTime, shotHojTicks * Time.fixedDeltaTime, shotInertialTicks * Time.fixedDeltaTime,
+                shotMidcourseTicks * Time.fixedDeltaTime, shotSalvoRole, shotOffsetTicks * Time.fixedDeltaTime));
+        }
+        #endregion
+
+        #region Inertial midcourse
+        const float inertialTargetTurn = 60f;    // m/s²: the turn assumed of a target flying unseen, for how far from its dead-reckoned position the seeker looks.
+        const float inertialGateMax = 6000f;     // m: the widest that search gets.
+        const float inertialGiveUpRange = 1500f; // m: having come this close to the dead-reckoned position without finding anything, the missile gives up as usual.
+        /// <summary>Whether this missile flies on inertially when the lock guiding it is lost before its own seeker is on.</summary>
+        protected bool InertialOn => inertialMidcourse && smartSeeker && AdvancedFlight && radarLOAL;
+        void NoteInertialCoast()
+        {
+            if (!InertialOn) return;
+            if (!InertialCoasting)
+            {
+                InertialCoasting = true;
+                inertialCoastStart = TimeIndex;
+                ++inertialCoastCount;
+                if (BDAStealth.Notify.Involves(SourceVessel, radarTarget.vessel)) BDAStealth.Notify.Post($"{shortName} · lock lost · inertial");
+            }
+            ++shotInertialTicks;
+        }
+        public static int inertialCoastCount;
+        #endregion
+
+        #region Coordinated salvo
+        public const float SalvoMinRange = 9000f;   // m: closer than this there is no room to come in on another bearing.
+        const float salvoSideAngle = 20f, salvoHighAngle = 15f, salvoMinEnergyMargin = 0.2f;
+        public static int salvoCoordinatedCount;
+        /// <summary>
+        /// At launch: with others of the team's missiles already flying at the same craft, take a side of it (or come in from above) that
+        /// none of them has, so that the salvo arrives from bearings one defensive turn can't put on its beam together. Only for a shot
+        /// with speed to spare, since the detour costs some.
+        /// </summary>
+        void AssignSalvoRole()
+        {
+            salvoOffsetAngle = 0f;
+            shotSalvoRole = "single";
+            if (!salvoCoordination || !AdvancedFlight || targetVessel == null || vessel == null) return;
+            Vessel target = targetVessel.Vessel;
+            var team = FiredByWM != null ? FiredByWM.Team : Team;
+            if (target == null || target.LandedOrSplashed || team == null) return;
+            Vector3 los = target.CoM - vessel.CoM;
+            if (los.sqrMagnitude < SalvoMinRange * SalvoMinRange) return;
+            bool left = false, right = false, high = false;
+            MissileBase lead = null;
+            foreach (var weapon in BDATargetManager.FiredMissiles)
+            {
+                if (weapon is not MissileBase m || m == this || !m.HasFired || m.HasExploded || m.HasMissed || m.judgedDefeated || m.targetVessel == null || m.targetVessel.Vessel != target) continue;
+                if ((m.FiredByWM != null ? m.FiredByWM.Team : m.Team) != team) continue;
+                if (m.shotSalvoRole == "left") left = true; else if (m.shotSalvoRole == "right") right = true; else if (m.shotSalvoRole == "high") high = true;
+                else if (lead == null) lead = m;
+            }
+            if (lead == null && !left && !right && !high) return; // The first at this target flies straight at it.
+            if (left && right && high) return;
+            Vessel launcher = vessel.Velocity().sqrMagnitude < 1f && SourceVessel != null ? SourceVessel : vessel;
+            BDArmory.Control.ShotModel.Estimate(this, launcher, target, out var features);
+            // Inside its no-escape range only: there the detour's cost in speed doesn't decide the shot.
+            if (!features.valid || !features.straight.reached || !features.escape.reached || features.energyMargin < salvoMinEnergyMargin) return;
+            Vector3 up = vessel.upAxis, toRight = Vector3.Cross(up, los).normalized;
+            // The side the target is crossing towards first: from there the missile also cuts the corner of a turn onto the beam of the others.
+            bool crossingRight = Vector3.Dot(target.Velocity(), toRight) >= 0f;
+            string role = crossingRight ? (!right ? "right" : !left ? "left" : "high") : (!left ? "left" : !right ? "right" : "high");
+            if (role == "high" && GuidanceMode == GuidanceModes.AAMLoft) return; // A lofted missile comes in from above anyway.
+            salvoOffsetDirection = role == "right" ? toRight : role == "left" ? -toRight : up;
+            salvoOffsetAngle = role == "high" ? salvoHighAngle : salvoSideAngle;
+            shotSalvoRole = role;
+            if (lead != null) lead.shotSalvoRole = "lead";
+            ++salvoCoordinatedCount;
+            Debug.Log($"[BDArmory.MissileBase]: Salvo {shortName} from {(SourceVessel != null ? SourceVessel.vesselName : "?")} at {target.vesselName}: {role} of {(lead != null ? lead.shortName + " from " + (lead.SourceVessel != null ? lead.SourceVessel.vesselName : "?") : "the others")}, {los.magnitude:F0}m");
+        }
+        #endregion
+
+        const float salvoOffsetStart = 10000f, salvoOffsetEnd = 5000f; // A salvo offset is flown in full beyond the first range and gone by the second.
+        /// <summary>
+        /// How far to one side of the target (at rel from the missile) a missile with a salvo role aims now: its offset angle's worth
+        /// of the range far out, less and less as it nears, so that it comes in on a bearing of its own.
+        /// </summary>
+        protected Vector3 SalvoOffset(Vector3 rel)
+        {
+            if (salvoOffsetAngle <= 0f || HomingOnJam) return Vector3.zero;
+            float range = rel.magnitude;
+            float share = Mathf.Clamp01((range - salvoOffsetEnd) / (salvoOffsetStart - salvoOffsetEnd));
+            if (share <= 0f) return Vector3.zero;
+            Vector3 side = salvoOffsetDirection.ProjectOnPlanePreNormalized(rel / range);
+            if (side.sqrMagnitude < 1e-4f) return Vector3.zero;
+            ++shotOffsetTicks;
+            return range * Mathf.Tan(salvoOffsetAngle * Mathf.Deg2Rad) * share * side.normalized;
+        }
+
+        #region Home on jam
+        float homeOnJamCheckTime = -1f;
+        public static int homeOnJamCount;
+        /// <summary>
+        /// A smart radar seeker tracking with its own seeker a craft whose noise jamming denies it range homes on the jamming instead
+        /// (checked four times a second): it stops transmitting, chaff no longer competes, and its guidance and motor fly without range.
+        /// </summary>
+        internal void UpdateHomeOnJam(Vessel target)
+        {
+            if (Time.time - homeOnJamCheckTime >= 0.25f || Time.time < homeOnJamCheckTime)
+            {
+                homeOnJamCheckTime = Time.time;
+                bool homing = homeOnJam && smartSeeker && AdvancedFlight && ActiveRadar && target != null && vessel != null
+                    && BDAStealth.Settings.Enabled && BDAStealth.Settings.HomeOnJam && BDAStealth.JamPatches.RangeDenied(target, vessel.CoM);
+                if (homing && !HomingOnJam)
+                {
+                    ++homeOnJamCount;
+                    Debug.Log($"[BDArmory.MissileBase]: {shortName} homing on {target.vesselName}'s jamming at {(target.CoM - vessel.CoM).magnitude:F0}m");
+                    if (BDAStealth.Notify.Involves(SourceVessel, target)) BDAStealth.Notify.Post($"{shortName} · home on jam · {target.vesselName}");
+                }
+                HomingOnJam = homing;
+            }
+            if (HomingOnJam) ++shotHojTicks;
         }
         #endregion
 
@@ -1280,7 +1579,7 @@ namespace BDArmory.Weapons.Missiles
                             //}
                             //else
                             ModuleRadar lockingRadar = t.lockedByRadar;
-                            TargetPosition = radarTarget.predictedPositionWithChaffFactor(!ActiveRadar ? lockingRadar.radarChaffClutterFactor * chaffEffectivity : chaffEffectivity,
+                            TargetPosition = RadarAimPoint(!ActiveRadar ? lockingRadar.radarChaffClutterFactor * chaffEffectivity : chaffEffectivity,
                                                                                           !ActiveRadar ? lockingRadar._radarChaffNotchVFac * chaffNotchVFac : chaffNotchVFac,
                                                                                           !ActiveRadar ? lockingRadar._radarChaffNotchRFac * chaffNotchRFac : chaffNotchRFac)
                                              + LockQualityError(radarTarget, lockingRadar);
@@ -1288,12 +1587,13 @@ namespace BDArmory.Weapons.Missiles
                             TargetAcceleration = radarTarget.acceleration;
                             targetVessel = t.targetInfo; //reset targetvessel in case of canRelock getting a new target
                             _lockFailTimer = 0;
+                            InertialCoasting = false;
                             startDirection = vectorToTarget; //have radar missile head in direction of last known radar contact if radarTarget goes off scope
                             return;
                         }
                         else
                         {
-                            if (_lockFailTimer > seekerTimeout) // Fly on the last known track for as long as the seeker would hold a lost target, giving the radar time to lock again.
+                            if (_lockFailTimer > seekerTimeout && !InertialOn) // Fly on the last known track for as long as the seeker would hold a lost target, giving the radar time to lock again.
                             {
                                 if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} with UUID: {vessel.id}: Semi-Active Radar guidance failed. Parent radar lost target.");
                                 radarTarget = TargetSignatureData.noTarget;
@@ -1308,12 +1608,13 @@ namespace BDArmory.Weapons.Missiles
                                     hasLostLock = true;
                                 }
                                 _lockFailTimer += Time.fixedDeltaTime;
+                                NoteInertialCoast();
                                 radarTarget.timeAcquired = Time.time;
                                 radarTarget.position = radarTarget.predictedPosition;
                                 //if (weaponClass == WeaponClasses.SLW)
                                 //    TargetPosition = radarTarget.predictedPosition;
                                 //else
-                                TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                                TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
                                 TargetVelocity = radarTarget.velocity;
                                 TargetAcceleration = Vector3.zero;
                                 TargetAcquired = true;
@@ -1323,7 +1624,7 @@ namespace BDArmory.Weapons.Missiles
                     else
                     {
                         // The launching radar has no lock at all. As above, fly on the last known track for a while instead of giving up at once.
-                        if (vrd == null || _lockFailTimer > seekerTimeout)
+                        if ((vrd == null || _lockFailTimer > seekerTimeout) && !InertialOn)
                         {
                             if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} with UUID: {vessel.id}: Semi-Active Radar guidance failed. Out of range and no data feed.");
                             radarTarget = TargetSignatureData.noTarget;
@@ -1332,9 +1633,10 @@ namespace BDArmory.Weapons.Missiles
                         }
                         if (_lockFailTimer <= 0) { hasLostLock = true; ++radarCoastCount; }
                         _lockFailTimer = Mathf.Max(_lockFailTimer, 0f) + Time.fixedDeltaTime;
+                        NoteInertialCoast();
                         radarTarget.timeAcquired = Time.time;
                         radarTarget.position = radarTarget.predictedPosition;
-                        TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                        TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
                         TargetVelocity = radarTarget.velocity;
                         TargetAcceleration = Vector3.zero;
                         TargetAcquired = true;
@@ -1357,7 +1659,7 @@ namespace BDArmory.Weapons.Missiles
                         if (scannedTargets == null) scannedTargets = new TargetSignatureData[BDATargetManager.LoadedVessels.Count];
                         //TargetSignatureData.ResetTSDArray(ref scannedTargets);
                         Ray ray = new Ray(transform.position, vectorToTarget);
-                        bool pingRWR = Time.time >= nextRWRPing;
+                        bool pingRWR = Time.time >= nextRWRPing && !HomingOnJam; // Homing on the target's own jamming, the seeker doesn't transmit.
                         if (pingRWR) nextRWRPing = Time.time + RadarUtils.ACTIVE_MISSILE_PING_PERSIST_TIME;
                         bool radarSnapshot = (snapshotTicker > 10);
                         if (radarSnapshot)
@@ -1380,8 +1682,21 @@ namespace BDArmory.Weapons.Missiles
                         else
                         {
                             float sqrThresh = 250000f;// radarLOALSearching ? 250000f : 1600; // 500 * 500 : 40 * 40;
+                            if (InertialCoasting)
+                            {
+                                // The target has been turning unseen since the lock was lost: look for it as far from the dead-reckoned
+                                // position as a hard turn could have taken it.
+                                float coast = TimeIndex - inertialCoastStart;
+                                float gate = Mathf.Min(500f + 0.5f * inertialTargetTurn * coast * coast, inertialGateMax);
+                                sqrThresh = gate * gate;
+                            }
                             float closestDist = float.MaxValue;
                             TargetSignatureData selectedTarget = TargetSignatureData.noTarget;
+                            // A smart seeker whose target is out of the fight (gone, or wreckage nobody is flying) takes the craft nearest
+                            // its nose among those in its view instead of following the wreck down.
+                            bool trackedFighting = InTheFight(radarTarget.vessel, radarTarget.targetInfo);
+                            if (trackedFighting) trackedAFighter = true;
+                            bool retarget = smartSeeker && trackedAFighter && !trackedFighting;
 
                             for (int i = 0; i < scannedTargets.Length; i++)
                             {
@@ -1398,7 +1713,14 @@ namespace BDArmory.Weapons.Missiles
                                 }
 
                                 float sqrDist = (currTarget.predictedPosition - radarTarget.predictedPosition).sqrMagnitude;
-                                if (sqrDist > sqrThresh || sqrDist > closestDist)
+                                // Searching a wide gate after inertial flight, only a craft still in the fight on the other side will do.
+                                if (InertialCoasting && (currTarget.targetInfo == null || currTarget.targetInfo.isMissile || !InTheFight(currTarget.vessel, currTarget.targetInfo) || Team.IsFriendly(currTarget.Team))) continue;
+                                if (retarget)
+                                {
+                                    if (currTarget.vessel == radarTarget.vessel || currTarget.targetInfo == null || currTarget.targetInfo.isMissile || !InTheFight(currTarget.vessel, currTarget.targetInfo)) continue;
+                                    sqrDist = VectorUtils.Angle(currTarget.predictedPosition - transform.position, GetForwardTransform()); // Nearest the nose, not nearest the wreck.
+                                }
+                                if ((!retarget && sqrDist > sqrThresh) || sqrDist > closestDist)
                                 {
                                     if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.missileBase][Radar LOAL]: {shortName} with UUID: {vessel.id}: Target: {currTarget.Name()} with UUID: {currTarget.ID()} at index {i} too far from target lock! SqrDist/MinSqrDist: {sqrDist}/{closestDist}");
                                     continue;
@@ -1411,7 +1733,7 @@ namespace BDArmory.Weapons.Missiles
                                     continue;
                                 }
 
-                                if (hasIFF && Team.IsFriendly(currTarget.Team))
+                                if ((hasIFF || retarget) && Team.IsFriendly(currTarget.Team)) // A new target is never one of the launcher's side.
                                 {
                                     if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase][Radar LOAL]: {shortName} with UUID: {vessel.id}: Target: {currTarget.Name()} with UUID: {currTarget.ID()} at index {i} rejected due to IFF! Team: {Team}, Target Team: {(currTarget.targetInfo.Team != null ? currTarget.targetInfo.Team.Name : "null")}");
                                     continue;
@@ -1428,13 +1750,26 @@ namespace BDArmory.Weapons.Missiles
 
                             if (selectedTarget.exists)
                             {
+                                if (retarget)
+                                {
+                                    Debug.Log($"[BDArmory.MissileBase]: {shortName} re-targeted from {(radarTarget.vessel != null ? radarTarget.vessel.vesselName : "a destroyed craft")} to {selectedTarget.vessel.vesselName}");
+                                    if (BDAStealth.Notify.Involves(SourceVessel, selectedTarget.vessel)) BDAStealth.Notify.Post($"{shortName} · new target · {selectedTarget.vessel.vesselName}");
+                                    targetVessel = selectedTarget.targetInfo;
+                                    RecordShotRetarget(selectedTarget.vessel);
+                                }
                                 radarTarget = selectedTarget;
+                                if (InertialCoasting)
+                                {
+                                    InertialCoasting = false;
+                                    Debug.Log($"[BDArmory.MissileBase]: {shortName} found {selectedTarget.Name()} with its own seeker after {TimeIndex - inertialCoastStart:F1}s of inertial flight");
+                                    if (BDAStealth.Notify.Involves(SourceVessel, selectedTarget.vessel)) BDAStealth.Notify.Post($"{shortName} · inertial · seeker on · {selectedTarget.Name()}");
+                                }
                                 TargetAcquired = true;
                                 radarLOALSearching = false;
                                 //if (weaponClass == WeaponClasses.SLW)
                                 //    TargetPosition = radarTarget.predictedPosition + (radarTarget.velocity * Time.fixedDeltaTime);
                                 //else
-                                TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                                TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
 
                                 TargetVelocity = radarTarget.velocity;
                                 TargetAcceleration = radarTarget.acceleration;
@@ -1455,6 +1790,31 @@ namespace BDArmory.Weapons.Missiles
                                 return;
                             }
 
+                            if (InertialCoasting && radarTarget.vessel != null && SupportingLock(radarTarget.vessel, out TargetSignatureData relocked) && relocked.exists)
+                            {
+                                // The launching side has its lock back: off the dead-reckoned point and onto the real track.
+                                radarTarget = relocked;
+                                InertialCoasting = false;
+                                RecordShotSupport(false);
+                                TargetAcquired = true;
+                                TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                                TargetVelocity = radarTarget.velocity;
+                                TargetAcceleration = radarTarget.acceleration;
+                                _lockFailTimer = 0;
+                                return;
+                            }
+                            if (InertialCoasting && vectorToTarget.sqrMagnitude > inertialGiveUpRange * inertialGiveUpRange)
+                            {
+                                // Still short of where the target should be: keep flying there, looking.
+                                TargetAcquired = true;
+                                radarTarget.timeAcquired = Time.time;
+                                radarTarget.position = radarTarget.predictedPosition;
+                                TargetPosition = radarTarget.predictedPosition;
+                                TargetVelocity = radarTarget.velocity;
+                                TargetAcceleration = Vector3.zero;
+                                NoteInertialCoast();
+                                return;
+                            }
                             if (!ActiveRadar && Time.time - TimeFired > 1)
                             {
                                 if (locksCount > 2)
@@ -1474,15 +1834,16 @@ namespace BDArmory.Weapons.Missiles
 
                     // The seeker doesn't have the target. If the launching radar still has it locked, fly on that track instead of searching
                     // blind or giving up; the seeker gets another look next frame.
-                    if (FiredByWM != null && FiredByWM.vesselRadarData != null && FiredByWM.vesselRadarData.locked && radarTarget.vessel != null)
+                    if (radarTarget.vessel != null)
                     {
-                        (TargetSignatureData parentTrack, bool parentLocked) = FiredByWM.vesselRadarData.detectedRadarTargetLock(radarTarget.vessel, FiredByWM);
+                        bool parentLocked = SupportingLock(radarTarget.vessel, out TargetSignatureData parentTrack);
                         if (parentLocked && parentTrack.exists)
                         {
                             radarTarget = parentTrack;
                             ++seekerHandBackCount;
+                            RecordShotSupport(false);
                             TargetAcquired = true;
-                            TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                            TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
                             TargetVelocity = radarTarget.velocity;
                             TargetAcceleration = radarTarget.acceleration;
                             _lockFailTimer = 0;
@@ -1504,7 +1865,7 @@ namespace BDArmory.Weapons.Missiles
                         }
                         TargetAcquired = true;
 
-                        TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                        TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
                         TargetVelocity = radarTarget.velocity;
                         TargetAcceleration = Vector3.zero;
                         ActiveRadar = false;
@@ -1639,6 +2000,7 @@ namespace BDArmory.Weapons.Missiles
 
                 if (lockedTarget.exists)
                 {
+                    if (lockedTarget.vessel != null && shotTarget != lockedTarget.vessel) RecordShotRetarget(lockedTarget.vessel);
                     radarTarget = lockedTarget;
                     targetVessel = radarTarget.targetInfo;
                     TargetAcquired = true;
@@ -1646,7 +2008,7 @@ namespace BDArmory.Weapons.Missiles
                     //if (weaponClass == WeaponClasses.SLW)
                     //    TargetPosition = radarTarget.predictedPosition + (radarTarget.velocity * Time.fixedDeltaTime);
                     //else
-                    TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                    TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
                     TargetVelocity = radarTarget.velocity;
                     TargetAcceleration = radarTarget.acceleration;
                     startDirection = TargetPosition - transform.position;

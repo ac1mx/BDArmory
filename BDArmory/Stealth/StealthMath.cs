@@ -242,6 +242,76 @@ namespace BDAStealth
             return Math.Min(MaxDecoyChance, baseChance * e * b * size);
         }
 
+        #region Smart seekers (MissileBase.smartSeeker): decoys take a track by what is in play, not by a roll
+        /// <summary>Seconds for the pull of chaff or flares on a smart seeker's track to fall by 1/e.</summary>
+        public const float PullDecay = 1f;
+
+        /// <summary>
+        /// Whether a smart seeker following a flare goes back to the craft, which it still has in view: once the craft looks brighter than
+        /// the flare by what the seeker rejects (the flare cooling, the craft closing), or once the craft is inside the range at which
+        /// the seeker tells its shape and within a few track gates of where the seeker is looking; or, having followed the flare for
+        /// FlareMemory seconds, once the flare has drifted out of the track gate around the craft: a flare slows down and falls away,
+        /// the craft keeps to the path the seeker remembers.
+        /// </summary>
+        public static bool FlareReleased(float craftHeat, float flareHeat, float rejection, bool resolved, float craftOffFlareDeg, float trackGate, float heldSeconds = 0f) =>
+            craftHeat >= Math.Max(rejection, 1f) * flareHeat || (resolved && craftOffFlareDeg < 4f * trackGate) || (heldSeconds >= FlareMemory && craftOffFlareDeg > trackGate);
+
+        /// <summary>Seconds a smart heat seeker follows a flare before it compares the flare's motion with the path its target was on.</summary>
+        public const float FlareMemory = 1.25f;
+
+        /// <summary>Seconds allowed for a flare stream to take a smart heat seeker's track (dwell in its track gate) before the hold has to start.</summary>
+        public const float FlareLead = 0.4f;
+
+        /// <summary>
+        /// How far chaff at rest falls inside a smart seeker's velocity gate on a craft with this speed along the line of sight:
+        /// 1 inside the gate, falling to 0 at one and a half times its width.
+        /// </summary>
+        public static float GateOverlap(float radialSpeed, float gate)
+        {
+            if (!(gate > 0f)) return 0f;
+            return Math.Min(Math.Max((1.5f * gate - Math.Abs(radialSpeed)) / (0.5f * gate), 0f), 1f);
+        }
+
+        /// <summary>
+        /// Pull of fresh chaff bundles on a smart seeker's track of a craft, inside the velocity gate only: by the bloom's size over the
+        /// craft's radar signature at the aspect in view, eased (power 0.75) so that a small craft hides behind one bundle and a large one
+        /// needs several in quick succession rather than more than it can release. The track goes to the bloom once the pull gathered reaches 1.
+        /// </summary>
+        public static float ChaffPull(int bundles, float effectivity, float floor, float radialSpeed, float gate, float targetRcs)
+        {
+            float e = Math.Max(effectivity, floor);
+            if (bundles <= 0 || !(e > 0f)) return 0f;
+            return bundles * e * GateOverlap(radialSpeed, gate) * (float)Math.Pow(ChaffCloudRcs / Math.Max(targetRcs, 0.01f), 0.75);
+        }
+
+        /// <summary>Bundles, released together, that bring a track's gathered pull to 1 (0: none can, the craft is outside the velocity gate).</summary>
+        public static int ChaffBundlesNeeded(float gathered, float pullPerBundle)
+        {
+            if (gathered >= 1f) return 1;
+            return pullPerBundle > 0f ? (int)Math.Ceiling((1f - gathered) / pullPerBundle) : 0;
+        }
+
+        /// <summary>Seconds a smart seeker stays on a chaff bloom that took its track with this much pull (re-cued at once by a data link).</summary>
+        public static float ChaffHold(float pull, bool recued) => recued ? 0.6f : 1.5f + Math.Min(Math.Max(pull - 1f, 0f), 2f);
+
+        /// <summary>
+        /// Rate (per second) at which a flare inside a smart seeker's track gate pulls the track: how far its brightness, over the tracked
+        /// craft's, exceeds what the seeker rejects. The track goes to the flare once the pull gathered reaches 1.
+        /// </summary>
+        public static float FlarePullRate(float ratio, float rejection, float effectivity, float floor)
+        {
+            float e = Math.Max(effectivity, floor);
+            if (!(ratio > 0f) || !(e > 0f)) return 0f;
+            return Math.Min(Math.Max(ratio * e / Math.Max(rejection, 0.05f) - 1f, 0f), 1f) / FlareDwell;
+        }
+
+        /// <summary>Seconds a flare at least twice as bright as the seeker rejects has to stay in the track gate to take the track; dimmer ones need longer.</summary>
+        public const float FlareDwell = 0.3f;
+
+        /// <summary>Pull left after a time without anything adding to it.</summary>
+        public static float PullAfter(float pull, float seconds) => pull <= 0f ? 0f : pull * (float)Math.Exp(-Math.Max(seconds, 0f) / PullDecay);
+        #endregion
+
         /// <summary>Unit direction for an (azimuth, elevation) aspect sample, same convention as BDA's RCS renders.</summary>
         public static void AspectDir(float azDeg, float elDeg, out double x, out double y, out double z)
         {

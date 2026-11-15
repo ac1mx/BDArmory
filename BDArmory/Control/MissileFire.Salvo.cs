@@ -29,19 +29,21 @@ namespace BDArmory.Control
         /// several missiles in flight at one target.
         /// </summary>
         public const float missileCorrelation = 0.5f;
+        /// <summary>The same for a coordinated salvo, arriving from bearings one turn can't beam together (as assumed as the above).</summary>
+        public const float coordinatedCorrelation = 0.3f;
         /// <summary>A further missile is fired only if it adds at least this much kill chance.</summary>
         public const float minMarginalKill = 0.08f;
 
         /// <summary>Chance that at least one of k missiles, each with chance p, kills.</summary>
-        public static float SalvoKill(float p, int k) => p > 0f && k > 0 ? 1f - Mathf.Pow(1f - Mathf.Min(p, 0.999f), 1f + (k - 1) * (1f - missileCorrelation)) : 0f;
+        public static float SalvoKill(float p, int k, float correlation = missileCorrelation) => p > 0f && k > 0 ? 1f - Mathf.Pow(1f - Mathf.Min(p, 0.999f), 1f + (k - 1) * (1f - correlation)) : 0f;
 
         /// <summary>The smallest salvo that reaches the kill goal, stopping early where another missile adds too little, within the allowance.</summary>
-        public static int MissilesOnTarget(float p, float killGoal, int allowance)
+        public static int MissilesOnTarget(float p, float killGoal, int allowance, float correlation = missileCorrelation)
         {
             int limit = Math.Max(1, Math.Min(allowance, (int)MissileFire.maxAllowableMissilesOnTarget));
             int k = 1;
             if (!(p > 0f)) return k;
-            while (k < limit && SalvoKill(p, k) < killGoal && SalvoKill(p, k + 1) - SalvoKill(p, k) >= minMarginalKill) ++k;
+            while (k < limit && SalvoKill(p, k, correlation) < killGoal && SalvoKill(p, k + 1, correlation) - SalvoKill(p, k, correlation) >= minMarginalKill) ++k;
             return k;
         }
         #endregion
@@ -201,7 +203,9 @@ namespace BDArmory.Control
                 foreach (var enemy in BDATargetManager.TargetList(Team))
                     if (enemy != null && enemy.Vessel != null && !enemy.isMissile && enemy.Vessel.LandedOrSplashed == ground) ++enemies;
             int allowance = Mathf.CeilToInt((spare + firedMissiles) / (float)Math.Max(enemies, 1));
-            int size = SalvoDecisions.MissilesOnTarget(p, killGoal, allowance);
+            missile.EnsureAdvancedFlight();
+            bool coordinated = missile.salvoCoordination && missile.AdvancedFlight && !ground && !intercept && (target.CoM - vessel.CoM).sqrMagnitude > MissileBase.SalvoMinRange * MissileBase.SalvoMinRange;
+            int size = SalvoDecisions.MissilesOnTarget(p, killGoal, allowance, coordinated ? SalvoDecisions.coordinatedCorrelation : SalvoDecisions.missileCorrelation);
             // The wingman's missiles already in the air at it count towards the salvo (grinder: while it defends, we close for the next shot).
             // Only beyond close range and for a modest shot of our own: a good shot, or one inside 10 km where there's no time to look, is
             // taken regardless (sec1: 95 holds in 8 km fights, mostly behind the wingman's poorer long shots).
@@ -263,6 +267,27 @@ namespace BDArmory.Control
         }
         List<IncomingMissile> lastIncomingMissiles;
 
+        /// <summary>
+        /// A second radar missile arriving within a few seconds of the first from a clearly different bearing: the direction to it. One
+        /// level turn can beam only one of the two.
+        /// </summary>
+        public bool SecondRadarThreat(Vessel first, Vector3 firstDirection, out Vector3 direction)
+        {
+            direction = default;
+            if (lastIncomingMissiles == null || first == null) return false;
+            float firstTime = incomingMissileTime, best = float.MaxValue;
+            foreach (var incoming in lastIncomingMissiles)
+            {
+                if (incoming.vessel == null || incoming.vessel == first || incoming.guidanceType != MissileBase.TargetingModes.Radar) continue;
+                if (incoming.time > firstTime + secondThreatWindow || incoming.time >= best) continue;
+                Vector3 toIt = (incoming.vessel.CoM - vessel.CoM).normalized;
+                if (Vector3.Dot(toIt, firstDirection) > secondThreatCos) continue;
+                best = incoming.time; direction = toIt;
+            }
+            return best < float.MaxValue;
+        }
+        const float secondThreatWindow = 8f, secondThreatCos = 0.906f; // s after the first; 25° apart.
+
         /// <summary>Flares to release now against the first incoming heat seeker (stock repetition with salvo decisions off or without the graded flare model).</summary>
         bool PlanFlares(out int count, out float interval)
         {
@@ -274,6 +299,24 @@ namespace BDArmory.Control
             if (p < 0f) return true;
             if (captured) { ++salvoFlaresHeld; return false; } // Already following a flare.
             int stock = CountermeasureStock(CMDropper.CountermeasureTypes.Flare);
+            if (seeker.smartSeeker)
+            {
+                // Nothing to roll for: flares go out while one can take this seeker's track from where it is, a stream dense enough that
+                // one is always inside its track gate for as long as that takes, and none while they can't (dimmer than it rejects from
+                // this side, or the seeker close enough to tell us from a flare).
+                // As late as still works: a flare only holds this seeker for about StealthMath.FlareMemory, so the stream goes out
+                // when that covers the missile's last seconds before it is inside its resolve range.
+                count = 0;
+                float resolveTime = threat.Value.distance > 0f ? threat.Value.time * seeker.resolveRange / threat.Value.distance : 0f;
+                if (stock > 0 && threat.Value.time <= resolveTime + StealthMath.FlareMemory + StealthMath.FlareLead && HeatPatches.SmartFlareWorth(seeker, vessel, out float dwell))
+                {
+                    interval = 0.25f;
+                    count = Mathf.Clamp(Mathf.CeilToInt(Mathf.Min(dwell, threat.Value.time) / interval) + 1, 2, Math.Min(stock, maxRelease));
+                }
+                if (count > 0) ++salvoFlareReleases; else ++salvoFlaresHeld;
+                if (count > 0 && BDModulePilotAI.steeringMetricsEnabled) Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture, "[BDArmory.MissileFire]: CMRelease vessel={0} type=flare count={1} timeToGo={2:F1} distance={3:F0} resolveTime={4:F1}", vessel.vesselName, count, threat.Value.time, threat.Value.distance, resolveTime));
+                return count > 0;
+            }
             count = SalvoDecisions.FlarePlan(p, fatigue, threat.Value.time, stock, Math.Min(3 * EnemyMissiles(MissileBase.TargetingModes.Heat), 24), out interval);
             if (count > 0) ++salvoFlareReleases; else ++salvoFlaresHeld;
             return count > 0;
@@ -291,9 +334,39 @@ namespace BDArmory.Control
             if (p < 0f) return true;
             if (seduced) { ++salvoChaffHeld; return false; }
             int stock = CountermeasureStock(CMDropper.CountermeasureTypes.Chaff);
+            if (seeker.smartSeeker)
+            {
+                // The bundles that take this seeker's track at this geometry, together, as late as still works: the bloom should outlast
+                // the rest of the flight (a re-cued missile is back on us within a second), but the seeker ignores chaff once it is
+                // inside its resolve range. None outside its velocity gate, where chaff does nothing.
+                int needed = ChaffPatches.SmartBundlesNeeded(seeker, vessel, out bool recued);
+                float resolveTime = threat.Value.distance > 0f ? threat.Value.time * seeker.resolveRange / threat.Value.distance : 0f;
+                count = needed > 0 && needed <= stock && threat.Value.time <= resolveTime + (recued ? 1f : 4f) ? Math.Min(needed, maxRelease) : 0;
+                interval = 0.25f;
+                if (count > 0) ++salvoChaffReleases; else ++salvoChaffHeld;
+                if (count > 0 && BDModulePilotAI.steeringMetricsEnabled) Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture, "[BDArmory.MissileFire]: CMRelease vessel={0} type=chaff count={1} timeToGo={2:F1} distance={3:F0} resolveTime={4:F1} recued={5}", vessel.vesselName, count, threat.Value.time, threat.Value.distance, resolveTime, recued));
+                return count > 0;
+            }
             count = SalvoDecisions.ChaffPlan(p, beamingChance, threat.Value.time, stock, Math.Min(2 * EnemyMissiles(MissileBase.TargetingModes.Radar), 24), out interval);
             if (count > 0) ++salvoChaffReleases; else ++salvoChaffHeld;
             return count > 0;
+        }
+
+        /// <summary>
+        /// Whether chaff can take the first incoming radar missile's track once we fly exactly across its line of sight (a smart seeker's
+        /// velocity gate): the pilot's cue to hold the beam before any chaff is out.
+        /// </summary>
+        public bool ChaffWantsBeam
+        {
+            get
+            {
+                if (!salvoDecisions) return false;
+                var threat = FirstIncoming(MissileBase.TargetingModes.Radar);
+                var seeker = threat != null ? VesselModuleRegistry.GetMissileBase(threat.Value.vessel) : null;
+                if (seeker == null || !seeker.smartSeeker) return false;
+                int needed = ChaffPatches.SmartBundlesNeeded(seeker, vessel, out _, true);
+                return needed > 0 && needed <= Math.Min(CountermeasureStock(CMDropper.CountermeasureTypes.Chaff), maxRelease);
+            }
         }
 
         /// <summary>

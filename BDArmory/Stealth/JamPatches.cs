@@ -34,6 +34,8 @@ namespace BDAStealth
         static MissileBase linkMissile;   // missile whose mid-course update is being evaluated
         static readonly List<float> onFactors = new List<float>(8), nowFactors = new List<float>(8);
         static float nextLockNote;
+        /// <summary>Times an AI pilot left its jammer off against a seeker that would home on it.</summary>
+        public static int JammerHeldOff;
 
         // ---- AI reactive ECM ----
 
@@ -58,6 +60,18 @@ namespace BDAStealth
                 if (ti == null || !(ti.radarBaseSignature > 0f)) return true;
 
                 bool aiJamming = __instance.isECMJamming;
+                if (mb.smartSeeker && mb.homeOnJam && mb.AdvancedFlight)
+                {
+                    // Jamming hands this seeker a silent track that chaff can't pull: with chaff left to fight it, the jammer stays off.
+                    // Without any, denying it range (a plainer homing law, its motor burnt early) is all there is.
+                    int chaff = 0;
+                    foreach (var cm in BDArmory.Utils.VesselModuleRegistry.GetModules<BDArmory.CounterMeasure.CMDropper>(v))
+                        if (cm != null && !cm.isMissileCM && cm.cmType == BDArmory.CounterMeasure.CMDropper.CountermeasureTypes.Chaff) chaff += cm.cmCount;
+                    if (chaff <= 0 && !BDArmory.Settings.BDArmorySettings.INFINITE_COUNTERMEASURES) return true;
+                    if (aiJamming) __instance.StopECM();
+                    ++JammerHeldOff;
+                    return false;
+                }
                 Patches.EcmTotals(v, _ => true, out float onNoise, out float onLock, onFactors);
                 Patches.EcmTotals(v, j => j.jammerEnabled && (!aiJamming || j.manuallyEnabled), out float nowNoise, out float nowLock, nowFactors);
                 float km = range * 0.001f;

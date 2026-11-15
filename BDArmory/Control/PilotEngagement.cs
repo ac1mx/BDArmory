@@ -55,8 +55,13 @@ namespace BDArmory.Control
             public float otherThreatShot;
             public bool otherThreatInescapable;
             public Vector3 otherThreatPosition;
+            // Launch zones along the present line (m, 0 until worked out): our best missile's maximum and no-escape range against the
+            // target, and the target's no-escape range against us.
+            public float ourMaxRange, ourNoEscapeRange, theirNoEscapeRange;
+            public float assistGain; // What lofting the launch from higher up would add to our best shot's chance.
             public void CopyFrom(EngagementPicture p)
             {
+                ourMaxRange = p.ourMaxRange; ourNoEscapeRange = p.ourNoEscapeRange; theirNoEscapeRange = p.theirNoEscapeRange; assistGain = p.assistGain;
                 target = p.target; time = p.time; lead = p.lead;
                 ourShot = p.ourShot; ourShotLater = p.ourShotLater; theirShot = p.theirShot; theirShotLater = p.theirShotLater; theirFlightTime = p.theirFlightTime;
                 ourReaches = p.ourReaches; theirInescapable = p.theirInescapable; theirInescapableLater = p.theirInescapableLater;
@@ -109,6 +114,7 @@ namespace BDArmory.Control
             switch (pictureStage)
             {
                 case 0:
+                    if (p.target != target) { p.ourMaxRange = p.ourNoEscapeRange = p.theirNoEscapeRange = p.assistGain = 0f; zoneCycle = 0; }
                     p.target = target;
                     p.lead = PlanLead();
                     CountMissiles(vessel, out p.ourLong, out p.ourShort);
@@ -118,14 +124,26 @@ namespace BDArmory.Control
                     TrackOwnMissiles(weaponManager, target, p);
                     UpdateMatchup(weaponManager, target, p);
                     break;
-                case 1: p.ourShot = BestPointedShot(vessel, target, 0f, out var ours); p.ourReaches = ours.valid && ours.straight.reached; break;
+                case 1: p.ourShot = BestPointedShot(vessel, target, 0f, out var ours); p.ourReaches = ours.valid && ours.straight.reached; planOwnMissile = bestPointedMissile; break;
                 case 2: p.ourShotLater = BestPointedShot(vessel, target, p.lead, out _); break;
-                case 3: p.theirShot = BestPointedShot(target, vessel, 0f, out var theirs); p.theirInescapable = theirs.valid && theirs.escape.reached; p.theirFlightTime = theirs.valid ? theirs.straight.time : 0f; break;
+                case 3: p.theirShot = BestPointedShot(target, vessel, 0f, out var theirs); p.theirInescapable = theirs.valid && theirs.escape.reached; p.theirFlightTime = theirs.valid ? theirs.straight.time : 0f; planTheirMissile = bestPointedMissile; break;
                 case 4: p.theirShotLater = BestPointedShot(target, vessel, p.lead, out var theirsLater); p.theirInescapableLater = theirsLater.valid && theirsLater.escape.reached; break;
                 case 5: OtherThreats(weaponManager, target, p); break;
+                // The launch zones take several flights each: one a tick, and only every fifth picture.
+                case 6: if (zoneCycle % zoneInterval == 0 && planOwnMissile != null) p.ourMaxRange = ShotModel.ZoneRange(planOwnMissile, vessel, target, false, p.ourMaxRange > 0f ? p.ourMaxRange : (target.CoM - vessel.CoM).magnitude); break;
+                case 7: if (zoneCycle % zoneInterval == 0 && planOwnMissile != null) p.ourNoEscapeRange = Mathf.Min(p.ourMaxRange, ShotModel.ZoneRange(planOwnMissile, vessel, target, true, p.ourNoEscapeRange > 0f ? p.ourNoEscapeRange : 0.5f * Mathf.Max(p.ourMaxRange, 2000f))); break; // A target that runs is never reached from further than one that doesn't.
+                case 8: if (zoneCycle % zoneInterval == 0 && planTheirMissile != null) p.theirNoEscapeRange = ShotModel.ZoneRange(planTheirMissile, target, vessel, true, p.theirNoEscapeRange > 0f ? p.theirNoEscapeRange : 0.5f * Mathf.Max(p.ourMaxRange, 2000f)); break;
+                case 9:
+                    p.assistGain = planOwnMissile != null && planOwnMissile.TargetingMode != MissileBase.TargetingModes.Heat
+                        ? ShotModel.EstimateAssisted(planOwnMissile, vessel, target, launchLoftAngle, launchLoftClimb) - p.ourShot : 0f;
+                    if (steeringMetricsEnabled && zoneCycle % (5 * zoneInterval) == 0 && planOwnMissile != null)
+                        Debug.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture, "[BDArmory.BDModulePilotAI]: Zones {0} at {1}: {2} range={3:F0} maxRange={4:F0} noEscape={5:F0} theirNoEscape={6:F0} shot={7:F2} assistGain={8:F2}",
+                            vessel.vesselName, target.vesselName, planOwnMissile.GetShortName(), (target.CoM - vessel.CoM).magnitude, p.ourMaxRange, p.ourNoEscapeRange, p.theirNoEscapeRange, p.ourShot, p.assistGain));
+                    ++zoneCycle;
+                    break;
             }
             plannerTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
-            if (++pictureStage > 5)
+            if (++pictureStage > 9)
             {
                 p.time = Time.time;
                 picture.CopyFrom(p);
@@ -152,18 +170,24 @@ namespace BDArmory.Control
             }
         }
 
+        const int zoneInterval = 5;
+        const float launchLoftAngle = 12f, launchLoftClimb = 1000f; // The loft (deg above the line to the target) and climb (m) the pilot can give a launch.
+        int zoneCycle;
+        MissileBase planOwnMissile, planTheirMissile;
+        static MissileBase bestPointedMissile; // The missile behind the last BestPointedShot.
         static readonly HashSet<string> pointedTypesSeen = new HashSet<string>();
         /// <summary>The best chance any of a craft's unfired air-to-air missiles would have against another if launched lead seconds from now with the nose on it.</summary>
         static float BestPointedShot(Vessel shooter, Vessel target, float lead, out ShotModel.Features best)
         {
             float bestChance = 0f;
             best = default;
+            bestPointedMissile = null;
             pointedTypesSeen.Clear();
             foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(shooter))
             {
                 if (missile == null || missile.HasFired || !missile.engageAir || missile.part == null || missile.part.partInfo == null || !pointedTypesSeen.Add(missile.part.partInfo.name)) continue;
                 float chance = ShotModel.EstimatePointed(missile, shooter, target, lead, out var features);
-                if (!best.valid || chance > bestChance) { bestChance = chance; best = features; }
+                if (!best.valid || chance > bestChance) { bestChance = chance; best = features; bestPointedMissile = missile; }
             }
             return bestChance;
         }
@@ -173,6 +197,7 @@ namespace BDArmory.Control
         {
             var rwr = weaponManager.rwr;
             if (rwr == null || !rwr.rwrEnabled || rwr.pingsData == null) return true;
+            if (rwr.EmitterOf(target) != null) return true;
             for (int i = 0; i < rwr.pingsData.Length; ++i)
                 if (rwr.pingsData[i].exists && rwr.pingsData[i].vessel == target && rwr.pingsData[i].signalType != RadarWarningReceiver.RWRThreatTypes.MWS) return true;
             return false;
@@ -197,7 +222,12 @@ namespace BDArmory.Control
                 if (result.reached)
                 {
                     if (p.ourMissileTimeToGo < 0f || result.time < p.ourMissileTimeToGo) p.ourMissileTimeToGo = result.time;
-                    if (missile.TargetingMode == MissileBase.TargetingModes.Radar && !missile.ActiveRadar) p.ourMissileNeedsSupport = true;
+                    // Until its own seeker is on, and after that for as long as our lock can put it back on the target over its data link.
+                    if (missile.TargetingMode == MissileBase.TargetingModes.Radar && (!missile.ActiveRadar || (missile.smartSeeker && missile.datalink)))
+                    {
+                        p.ourMissileNeedsSupport = true;
+                        if (missile.ActiveRadar) ++planLinkSupports;
+                    }
                 }
                 else if (ml.MissileState == MissileBase.MissileStates.PostThrust && ml.TimeIndex > 3f && (result.gaveUp || result.missDistance > 5f * Mathf.Max(ml.GetBlastRadius(), 10f)))
                 {
@@ -224,6 +254,7 @@ namespace BDArmory.Control
                 Vector3 toUs = vessel.CoM - other.CoM;
                 float distance = toUs.magnitude;
                 if (distance > otherThreatRange || Vector3.Dot(other.srf_vel_direction, toUs) < 0.766f * distance) continue; // Not within 40° of pointing at us.
+                if (!KnownThreat(weaponManager, other, distance)) { ++rwrUnseenThreats; continue; } // Nothing tells us it is there.
                 ++p.otherThreats;
                 if (distance < nearest) { nearest = distance; p.otherThreatPosition = other.CoM; }
                 if (evaluated++ >= 2) continue; // The two nearest are enough for the shot.
@@ -240,7 +271,24 @@ namespace BDArmory.Control
         const float forcingFloor = 0.08f, forcingPressure = 0.15f, forcingInterval = 20f, followUpWindow = 45f, unseenWaitGain = 0.05f;
         float forcingPendingUntil = -1f, lastForcingTime = -100f, lastDefeatedTime = -100f;
         Vessel lastForcingTarget;
-        int planForcingShots, planFollowUps, planReshots, planDefeatedMissiles, planUnseenHolds, planNoWaits;
+        int planForcingShots, planFollowUps, planReshots, planDefeatedMissiles, planUnseenHolds, planNoWaits, planNoEscapeShots;
+        float noEscapePendingUntil = -1f;
+        const float noEscapeThresholdShare = 0.75f;
+
+        /// <summary>
+        /// Inside the missile's no-escape zone (the target can't outrun it by turning away now) a shot a little under the usual
+        /// threshold is taken: only countermeasures can still beat it. Keeps the last missile for a full-value shot.
+        /// </summary>
+        bool NoEscapeShotWanted(MissileFire weaponManager, Vessel target, MissileBase missile, in ShotModel.Features features)
+        {
+            if (!PlanActive(weaponManager) || !NewAwareness || !features.valid || !features.escape.reached) return false;
+            if (ShotEstimate < noEscapeThresholdShare * ShotThreshold) return false;
+            if (weaponManager.GetMissilesAway(weaponManager.currentTarget).numAway > 0) return false;
+            int spare = 0;
+            foreach (var other in VesselModuleRegistry.GetModules<MissileBase>(vessel))
+                if (other != null && !other.HasFired && other.TargetingMode == missile.TargetingMode) ++spare;
+            return spare >= 2;
+        }
 
         /// <summary>Whether the target is turned away from us (its nose more than the given angle off us): defending, not shooting.</summary>
         bool TurnedAway(Vessel v, float angle)
@@ -285,6 +333,7 @@ namespace BDArmory.Control
         {
             string kind = ShotKind(target);
             if (kind == "forcing") { ++planForcingShots; lastForcingTime = Time.time; lastForcingTarget = target; forcingPendingUntil = -1f; }
+            else if (kind == "noEscape") { ++planNoEscapeShots; noEscapePendingUntil = -1f; }
             else if (kind == "free") { ++matchupFreeShots; freeShotPendingUntil = -1f; }
             else if (kind == "reshot") ++planReshots;
             else if (kind == "followUp") ++planFollowUps;
@@ -294,6 +343,7 @@ namespace BDArmory.Control
         string ShotKind(Vessel target)
         {
             if (Time.time < forcingPendingUntil) return "forcing";
+            if (Time.time < noEscapePendingUntil) return "noEscape";
             if (Time.time < freeShotPendingUntil) return "free";
             if (Time.time - lastDefeatedTime < 10f) return "reshot"; // A missile was written off just before.
             if (target == lastForcingTarget && Time.time - lastForcingTime < followUpWindow) return "followUp";
@@ -316,7 +366,7 @@ namespace BDArmory.Control
         Vessel planModeVessel;
         Vector3 abortFrom;
         readonly List<float> abortTimes = new List<float>();
-        int planAborts, planRecommits, planPressTicks, planCutoffTicks, planAbortTicks, planSupportThroughTicks;
+        int planAborts, planRecommits, planPressTicks, planCutoffTicks, planAbortTicks, planSupportThroughTicks, planLinkSupports, planDoubleNotchTicks;
         const float abortShotFloor = 0.3f, abortRecommitShot = 0.2f, abortMinTime = 6f, abortMaxTime = 25f, abortBudgetWindow = 180f;
         const int abortBudget = 3;
 
@@ -390,6 +440,7 @@ namespace BDArmory.Control
             }
 
             if (HoldRange(v, distanceToTarget, settingUpLaunch, threshold, ref target)) { SetPlanMode(PlanMode.None, null); return "Hold range"; }
+            if (SpikeCrank(weaponManager, v, vectorToTarget, distanceToTarget, threshold, ref target)) { SetPlanMode(PlanMode.None, null); return "Spike crank"; }
             if (CompressTo(v, distanceToTarget, settingUpLaunch, threshold, ref target)) { SetPlanMode(PlanMode.None, null); return "Compress"; }
 
             if (SectionBracket(weaponManager, v, vectorToTarget, distanceToTarget, ref target)) { SetPlanMode(PlanMode.None, null); return "Bracket"; }
@@ -423,6 +474,7 @@ namespace BDArmory.Control
             Vector3 away = (vessel.CoM - from).ProjectOnPlanePreNormalized(upDirection);
             if (away.sqrMagnitude < 1f) away = vessel.srf_vel_direction.ProjectOnPlanePreNormalized(upDirection);
             away.Normalize();
+            if (NewAwareness && TerrainMask(from, away, out Vector3 masked)) { ++maskTicks; return vessel.CoM + 3000f * masked; } // Behind a ridge if there is one.
             float floor = Mathf.Max(minAltitude + 1000f, 0.5f * defaultAltitude);
             float descent = Mathf.Clamp((float)vessel.radarAltitude - floor, 0f, 800f); // At most about 15° down.
             return vessel.CoM + 3000f * away - descent * upDirection;
@@ -469,7 +521,7 @@ namespace BDArmory.Control
             if (weaponManager.incomingMissileTime < Mathf.Max(6f, ourArrival + 3f)) return false;
             var incoming = weaponManager.incomingMissileVessel != null ? VesselModuleRegistry.GetMissileBase(weaponManager.incomingMissileVessel) : null;
             if (incoming == null || incoming.SourceVessel != targetVessel) return false; // Only the target dies with our hit.
-            if (incoming.TargetingMode != MissileBase.TargetingModes.Radar || incoming.ActiveRadar) return false;
+            if (incoming.TargetingMode != MissileBase.TargetingModes.Radar || SeekerHeardActive(weaponManager, incoming)) return false;
             float distance = (weaponManager.incomingMissileVessel.CoM - vessel.CoM).magnitude;
             float closing = Mathf.Max(Vector3.Dot(weaponManager.incomingMissileVessel.Velocity() - vessel.Velocity(), (vessel.CoM - weaponManager.incomingMissileVessel.CoM) / Mathf.Max(distance, 1f)), 50f);
             float timeToActive = (distance - incoming.activeRadarRange) / closing; // Semi-active (no seeker range) only when it arrives.
@@ -572,10 +624,15 @@ namespace BDArmory.Control
         string SalvoMetrics() => WeaponManager != null ? WeaponManager.SalvoMetrics() : "";
 
         string PlannerMetrics() => string.Format(System.Globalization.CultureInfo.InvariantCulture,
-            "planner={0} plan=forcing {1}/followUp {2}/reshot {3}/writtenOff {4}/unseenHolds {5}/noWait {17} aborts {6}/recommits {7}/abort {8:F1}s press {9:F1}s cutoff {10:F1}s supportThrough {11:F1}s noMerge {12} disengage {18} style angles {13:F1}s/energy {14:F1}s planCost={15:F0}us/picture health={16:F2}",
+            "planner={0} plan=forcing {1}/followUp {2}/reshot {3}/writtenOff {4}/unseenHolds {5}/noWait {17} aborts {6}/recommits {7}/abort {8:F1}s press {9:F1}s cutoff {10:F1}s supportThrough {11:F1}s noMerge {12} disengage {18} style angles {13:F1}s/energy {14:F1}s planCost={15:F0}us/picture health={16:F2} linkSupports={19} noEscapeShots={20} doubleNotch={21:F1}s launchLoft={22:F1}s launchClimb={23:F1}s drag={24:F1}s mask={25:F1}s zones={26:F0}/{27:F0}/{28:F0} allCraft: jammerHeldOff={29} homeOnJam={30} inertialCoasts={31} salvoRoles={32} spikes={33} launchWarnings={34} quietRadarPingsMissed={35} rwrCued={36} | spikeCrank={37:F1}s unseenThreats={38} rwrLocks={39}",
             engagementPlanner, planForcingShots, planFollowUps, planReshots, planDefeatedMissiles, planUnseenHolds, planAborts, planRecommits, planAbortTicks * Time.fixedDeltaTime,
             planPressTicks * Time.fixedDeltaTime, planCutoffTicks * Time.fixedDeltaTime, planSupportThroughTicks * Time.fixedDeltaTime, planNoMerges,
             planAnglesTicks * bfmReplanInterval, planEnergyTicks * bfmReplanInterval,
-            plannerCycles > 0 ? plannerTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / plannerCycles : 0, health, planNoWaits, planDisengages);
+            plannerCycles > 0 ? plannerTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / plannerCycles : 0, health, planNoWaits, planDisengages, planLinkSupports,
+            planNoEscapeShots, planDoubleNotchTicks * Time.fixedDeltaTime, launchLoftTicks * Time.fixedDeltaTime, energyClimbTicks * Time.fixedDeltaTime, dragTicks * Time.fixedDeltaTime, maskTicks * Time.fixedDeltaTime,
+            picture.ourMaxRange, picture.ourNoEscapeRange, picture.theirNoEscapeRange,
+            BDAStealth.JamPatches.JammerHeldOff, MissileBase.homeOnJamCount, MissileBase.inertialCoastCount, MissileBase.salvoCoordinatedCount,
+            RadarWarningReceiver.Spikes, RadarWarningReceiver.LaunchWarnings, RadarWarningReceiver.QuietRadarPingsMissed, RadarWarningReceiver.CuedReports,
+            spikeCrankTicks * Time.fixedDeltaTime, rwrUnseenThreats, WeaponManager != null && WeaponManager.rwr != null ? WeaponManager.rwr.LockCount() : 0);
     }
 }

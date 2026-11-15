@@ -1,5 +1,7 @@
 using System;
 
+using BDArmory.Guidances;
+
 namespace BDArmory.Control
 {
     /// <summary>The parts of a MissileLauncher's config that decide how it flies.</summary>
@@ -8,6 +10,13 @@ namespace BDArmory.Control
         public float mass, thrust, boostTime, cruiseThrust, cruiseTime, dropTime, liftArea, dragArea, maxAoA, maxTorque, blastRadius;
         public float liftMultiplier, dragMultiplier;
         public float responseTime; // s: time constant of the turning acceleration following the guidance command (0: at once).
+        public GuidanceLaw law;    // Homing law (Config and ProNav: proportional navigation).
+        public float lawRange;     // m: the law is flown inside this range of the target, proportional navigation before (0: all the way).
+        public float targetMax;    // m/s²: the turn the law assumes the target capable of.
+        public MotorMode motor;    // How the sustainer is spent.
+        public float minThrottle;  // Throttle motors: lowest throttle.
+        public float sustainUsed;  // s of sustainer already burnt at full thrust (a missile in flight).
+        public bool sustainLit;    // Pulse motors: the second pulse is already burning (a missile in flight).
     }
 
     /// <summary>
@@ -133,6 +142,22 @@ namespace BDArmory.Control
             return best;
         }
 
+        /// <summary>The smallest angle of attack (°, up to the cap) that turns at the given acceleration (m/s²) at a dynamic pressure and thrust.</summary>
+        public static float AoAForLateral(in MissileSpec m, float q, float thrust, float lateral, float cap)
+        {
+            const double deg = Math.PI / 180.0;
+            float liftSk = m.liftArea * m.liftMultiplier, mass = Math.Max(m.mass, 1e-4f);
+            float Lateral(float a) => (q * liftSk * Lift(a) + thrust * (float)Math.Sin(a * deg)) / mass;
+            if (lateral <= 1e-3f) return 0f;
+            if (Lateral(cap) <= lateral) return cap;
+            float lo = 0f, hi = cap;
+            for (int i = 0; i < 12; ++i) { float mid = 0.5f * (lo + hi); if (Lateral(mid) < lateral) lo = mid; else hi = mid; }
+            return hi;
+        }
+
+        /// <summary>The angle of attack (°) at which the missile turns hardest at a dynamic pressure and thrust, within its limits.</summary>
+        public static float BestAoA(in MissileSpec m, float q, float thrust) => BestTurningAoA(Math.Min(m.maxAoA, TorqueAoALimit(m, q)), q, m.liftArea * m.liftMultiplier, thrust);
+
         /// <summary>Turning acceleration (g) at the best angle of attack within the missile's limits, at a speed and air density.</summary>
         public static float TurningG(in MissileSpec m, float speed, float density, float gravity, float thrust = 0f)
         {
@@ -154,11 +179,14 @@ namespace BDArmory.Control
         /// Fly a shot. Positions are relative to the launch point in the local frame; the target keeps its velocity plus a constant
         /// acceleration (capped to its maximum speed) for the whole flight. density(altitude) gives the air density at a height above the
         /// launch point's sea level reference, launchAltitude is the launch point's own altitude. elapsed is the time since launch for a
-        /// missile already flying (its motor phases follow it); maxTime and the result's time count from now.
+        /// missile already flying (its motor phases follow it); maxTime and the result's time count from now. With evadeG the target also
+        /// turns level at that many g once the missile is within evadeTimeToGo seconds of it, reversing every evadePeriod seconds (0: one
+        /// way; negative g: the other way first).
         /// </summary>
         public static Result Fly(in MissileSpec m, double vx, double vy, double vz,
             double tx, double ty, double tz, double tvx, double tvy, double tvz, double tax, double tay, double taz, double targetMaxSpeed,
-            double launchAltitude, Func<double, float> density, float gravity, float speedOfSound, float dt = 0.1f, float maxTime = 120f, float navigation = 3f, float elapsed = 0f)
+            double launchAltitude, Func<double, float> density, float gravity, float speedOfSound, float dt = 0.1f, float maxTime = 120f, float navigation = 3f, float elapsed = 0f,
+            float evadeG = 0f, float evadeTimeToGo = 0f, float evadePeriod = 0f)
         {
             double px = 0, py = 0, pz = 0;
             const double deg = Math.PI / 180.0;
@@ -170,6 +198,11 @@ namespace BDArmory.Control
             double lx0 = 0, ly0 = 0, lz0 = 0; // Turning acceleration being flown (m/s²), following the command with the response lag.
             var torqueLimit = torqueLimits ?? (torqueLimits = new TorqueLimitTable());
             torqueLimit.Build(m);
+            bool managedMotor = m.motor != MotorMode.Sustain, lit = m.sustainLit;
+            float evadeStart = -1f;
+            float sustainUsed = m.sustainUsed;
+            bool law = m.law > GuidanceLaw.ProNav;
+            var state = new GuidanceLaws.State { lag = m.responseTime > 0 ? m.responseTime : 0.05f, targetMax = m.targetMax > 0 ? m.targetMax : 80f, navigation = navigation };
             while (t < maxTime)
             {
                 double rx = tx - px, ry = ty - py, rz = tz - pz;
@@ -183,7 +216,23 @@ namespace BDArmory.Control
                 double cpa = Math.Sqrt(cx * cx + cy * cy + cz * cz);
                 float rho = density(launchAltitude + pz);
                 float q = 0.5f * rho * (float)(speed * speed);
-                float thrust = ThrustAt(m, elapsed + t);
+                float thrust;
+                bool burntOut;
+                if (!managedMotor) { thrust = ThrustAt(m, elapsed + t); burntOut = thrust == 0f && elapsed + t > m.dropTime + m.boostTime; }
+                else
+                {
+                    float sinceDrop = elapsed + t - m.dropTime;
+                    if (sinceDrop < 0f) thrust = 0f;
+                    else if (sinceDrop < m.boostTime) thrust = m.thrust;
+                    else
+                    {
+                        float throttle = GuidanceLaws.SustainThrottle(m.motor, m.minThrottle, m.cruiseTime - sustainUsed, closing > 1 ? r / closing : -1, speed,
+                            Math.Sqrt(tvx * tvx + tvy * tvy + tvz * tvz), ref lit);
+                        thrust = throttle * m.cruiseThrust;
+                        sustainUsed += throttle * dt;
+                    }
+                    burntOut = sinceDrop >= m.boostTime && sustainUsed >= m.cruiseTime;
+                }
                 float aoaCap = q > 1f ? BestTurningAoA(Math.Min(m.maxAoA, torqueLimit.Limit(q)), q, liftSk, thrust) : 0f;
                 if (cpa < result.missDistance)
                 {
@@ -196,11 +245,23 @@ namespace BDArmory.Control
                 if (result.missDistance <= 0.5f * m.blastRadius) break;
                 if (t > 3f && closing < 0 && r > result.missDistance + 50) break; // Past the target.
                 if (launchAltitude + pz < 0) break; // Into the ground/sea.
-                if (thrust == 0f && elapsed + t > m.dropTime + m.boostTime && speed < KinematicSpeed(m, rho, gravity, speedOfSound)) { result.gaveUp = true; break; }
+                if (burntOut && speed < KinematicSpeed(m, rho, gravity, speedOfSound)) { result.gaveUp = true; break; }
 
                 double ux = vx / speed, uy = vy / speed, uz = vz / speed;
                 double ax = 0, ay = 0, az = 0;
-                if (elapsed + t >= m.dropTime && r > 1)
+                float Lateral(float a) => (q * liftSk * Lift(a) + thrust * (float)Math.Sin(a * deg)) / mass;
+                double reach = q > 1f ? Lateral(aoaCap) : 0.0;
+                if (law && elapsed + t >= m.dropTime && r > 1 && (m.lawRange <= 0f || r < m.lawRange))
+                {
+                    state.rx = rx; state.ry = ry; state.rz = rz; state.vx = rvx; state.vy = rvy; state.vz = rvz;
+                    state.tax = tax; state.tay = tay; state.taz = taz; state.max = lx0; state.may = ly0; state.maz = lz0;
+                    state.ux = ux; state.uy = uy; state.uz = uz; state.missileMax = (float)reach;
+                    if (!GuidanceLaws.Command(m.law, state, out ax, out ay, out az, out _)) { ax = ay = 0; az = 0; }
+                    az += gravity;
+                    double along0 = ax * ux + ay * uy + az * uz;
+                    ax -= along0 * ux; ay -= along0 * uy; az -= along0 * uz;
+                }
+                else if (elapsed + t >= m.dropTime && r > 1)
                 {
                     // Proportional navigation: navigation × closing speed × line-of-sight rate, across the velocity, plus gravity compensation.
                     double wx = (ry * rvz - rz * rvy) / r2, wy = (rz * rvx - rx * rvz) / r2, wz = (rx * rvy - ry * rvx) / r2;
@@ -212,9 +273,7 @@ namespace BDArmory.Control
                     ax -= along0 * ux; ay -= along0 * uy; az -= along0 * uz;
                 }
                 double command = Math.Sqrt(ax * ax + ay * ay + az * az);
-                float Lateral(float a) => (q * liftSk * Lift(a) + thrust * (float)Math.Sin(a * deg)) / mass;
                 // The command within what the missile can pull, then the response lag.
-                double reach = q > 1f ? Lateral(aoaCap) : 0.0;
                 if (command > reach && command > 1e-6) { double k = reach / command; ax *= k; ay *= k; az *= k; }
                 lx0 += (ax - lx0) * lagGain; ly0 += (ay - ly0) * lagGain; lz0 += (az - lz0) * lagGain;
                 double alongLag = lx0 * ux + ly0 * uy + lz0 * uz; // Keep it across the (turning) flight path.
@@ -237,6 +296,19 @@ namespace BDArmory.Control
                 vz += (along * uz + lz0 - gravity) * dt;
                 px += vx * dt; py += vy * dt; pz += vz * dt;
                 tvx += tax * dt; tvy += tay * dt; tvz += taz * dt;
+                if (evadeG != 0f && closing > 1 && r / closing < evadeTimeToGo)
+                {
+                    if (evadeStart < 0f) evadeStart = t;
+                    double level = Math.Sqrt(tvx * tvx + tvy * tvy);
+                    if (level > 1)
+                    {
+                        double side = evadePeriod > 0f && ((int)((t - evadeStart) / evadePeriod) & 1) == 1 ? -1 : 1;
+                        double turn = side * evadeG * gravity * dt / level, cos = Math.Cos(turn), sin = Math.Sin(turn);
+                        double nx = tvx * cos - tvy * sin, ny = tvx * sin + tvy * cos;
+                        tax = (nx - tvx) / dt; tay = (ny - tvy) / dt; taz = 0; // What a seeker measuring the target would see.
+                        tvx = nx; tvy = ny;
+                    }
+                }
                 double targetSpeed = Math.Sqrt(tvx * tvx + tvy * tvy + tvz * tvz);
                 if (targetSpeed > targetMaxSpeed && targetSpeed > 0) { double k = targetMaxSpeed / targetSpeed; tvx *= k; tvy *= k; tvz *= k; }
                 tx += tvx * dt; ty += tvy * dt; tz += tvz * dt;

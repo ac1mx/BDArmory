@@ -116,6 +116,7 @@ static class CraftSim
         float prior = 0f, fatigue = 0f, fatigueTime = 0f;
         // radar seeker state
         float seducedUntil = -1f; Vector2 bloom = Vector2.Zero;
+        float chaffPull = 0f, chaffPullTime = 0f, flarePull = 0f;
         // AI countermeasure program
         int count = ir ? 3 : 2; float interval = ir ? 0.2f : 0.5f, wait = ir ? 0.7f : 0.6f;
         float nextRelease = -1f; int inBurst = 0;
@@ -142,10 +143,21 @@ static class CraftSim
                     }
                 else
                 {
+                    if (Smart)
+                    {
+                        // ChaffPatches.Gather: the bundles' pull adds to what the track has gathered; at 1 the track goes to the bloom.
+                        chaffPull = StealthMath.PullAfter(chaffPull, t - chaffPullTime)
+                            + StealthMath.ChaffPull(craft.ChaffPods, 1f, CmFloor, Vector2.Dot(jv, los / dist), SmartVelocityGate, AspectRcs(craft, ecm, Vector2.Dot(jh, -los / dist)));
+                        chaffPullTime = t;
+                        if (chaffPull >= 1f && t >= seducedUntil) { seducedUntil = t + StealthMath.ChaffHold(chaffPull, false); bloom = j; chaffPull = 0f; }
+                    }
+                    else
+                    {
                     float beam = StealthMath.DopplerOverlap(MathF.Abs(Vector2.Dot(jv, los / dist)));
                     float chance = StealthMath.ChaffSeduction(ChaffChance, 1f, CmFloor, beam, AspectRcs(craft, ecm, Vector2.Dot(jh, -los / dist)));
                     for (int p = 0; p < craft.ChaffPods; p++)
                         if (rng.NextDouble() < chance) { seducedUntil = t + U(1.5f, 3.5f); bloom = j; break; }
+                    }
                 }
             }
 
@@ -158,6 +170,12 @@ static class CraftSim
                 Vector2 ray = held != null ? held.Pos - m : lost ? pred - m : los;
                 if (held == null && !lost) prior = jetSeen;
                 Flare pick = null; float pickHeat = 0f;
+                // HeatPatches.FlarePrefix, smart seekers: inside the resolve range a seeker on a flare goes back to the jet if it is in view.
+                bool resolved = Smart && dist < SmartResolveRange;
+                if (Smart && held != null && AngleDeg(los, ray) < ScanRadius
+                    && StealthMath.FlareReleased(jetSeen, held.Thermal * 1.96e6f / Math.Clamp((held.Pos - m).LengthSquared(), 9e4f, 3.6e7f), SmartFlareRejection, resolved, AngleDeg(los, held.Pos - m), SmartTrackGate))
+                { held = null; lost = false; prior = jetSeen; ray = los; }
+                Flare brightest = null; float brightestRate = 0f, brightestHeat = 0f;
                 foreach (Flare f in flares)
                 {
                     if (t - f.Lit > 5f) continue;
@@ -165,6 +183,14 @@ static class CraftSim
                     if (!(AngleDeg(to, ray) < ScanRadius)) continue;
                     float seen = f.Thermal * 1.96e6f / Math.Clamp(to.LengthSquared(), 9e4f, 3.6e7f);
                     bool captured = f == held;
+                    if (Smart)
+                    {
+                        if (captured) { if (seen > pickHeat) { pick = f; pickHeat = seen; } continue; }
+                        if (held != null || lost || resolved || !(prior > 0f) || AngleDeg(to, los) > SmartTrackGate) continue;
+                        float pullRate = StealthMath.FlarePullRate(seen / prior, SmartFlareRejection, 1f, CmFloor);
+                        if (pullRate > brightestRate) { brightest = f; brightestRate = pullRate; brightestHeat = seen; }
+                        continue;
+                    }
                     if (!captured && !f.Rolled && prior > 0f)
                     {
                         f.Rolled = true;
@@ -173,6 +199,11 @@ static class CraftSim
                         if (!captured) { fatigue = fat + 1f; fatigueTime = t; }
                     }
                     if (captured && seen > pickHeat) { pick = f; pickHeat = seen; }
+                }
+                if (Smart && pick == null)
+                {
+                    flarePull = StealthMath.PullAfter(flarePull, Dt) + brightestRate * Dt;
+                    if (brightest != null && flarePull >= 1f) { pick = brightest; pickHeat = brightestHeat; flarePull = 0f; }
                 }
                 if (pick != null && pickHeat > HeatThreshold) { held = pick; lost = false; prior = pickHeat; }
                 else
@@ -232,9 +263,24 @@ static class CraftSim
         return hits / (float)runs;
     }
 
+    // Smart seekers (MissileBase.smartSeeker): the test variants' values.
+    static bool Smart;
+    const float SmartVelocityGate = 50f, SmartTrackGate = 2f, SmartResolveRange = 1500f;
+    const float SmartFlareRejection = 1.25f;
+
     public static void Run()
     {
         Ranges();
+        foreach (bool smart in new[] { false, true })
+        {
+            Smart = smart;
+            Console.WriteLine(smart ? "\n##### SMART SEEKERS #####" : "\n##### GRADED ROLLS #####");
+            Tables();
+        }
+    }
+
+    static void Tables()
+    {
 
         Console.WriteLine("\n=== AIM-9X vs a jet with 2 flare pods, AI flare program (hit chance) ===");
         Console.WriteLine($"{"aspect",-9}{"jet",-13}{"no flares",11}{"flares",9}");

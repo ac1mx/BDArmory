@@ -2395,6 +2395,13 @@ namespace BDArmory.Weapons.Missiles
                     if (missReason == null) missReason = noProgress ? (MissileState == MissileStates.PostThrust && vessel.srfSpeed < GetKinematicSpeed() ? "tooSlow" : "noProgress") : !TargetAcquired ? "noTarget" : maxAltitude != 0f && vessel.altitude >= maxAltitude ? "maxAltitude" : "pastTarget";
                     HasMissed = true;
                     guidanceActive = false;
+                    Vessel missedVessel = targetVessel != null ? targetVessel.Vessel : null;
+                    if (BDAStealth.Notify.Involves(SourceVessel, missedVessel))
+                    {
+                        bool onDecoy = TargetAcquired && missedVessel != null && (TargetPosition - missedVessel.CoM).sqrMagnitude > 150f * 150f;
+                        string why = missReason == "tooSlow" ? "out of energy" : missReason == "noProgress" ? "outrun" : missReason == "noTarget" ? "lost track" : missReason == "maxAltitude" ? "ceiling" : onDecoy ? "decoyed" : "overshot";
+                        BDAStealth.Notify.Post(missedVessel != null ? $"{shortName} · miss · {why} · {missedVessel.vesselName}" : $"{shortName} · miss · {why}");
+                    }
 
                     MissileLauncher launcher = this as MissileLauncher;
                     if (launcher != null)
@@ -2561,7 +2568,7 @@ namespace BDArmory.Weapons.Missiles
                         //decrease turn rate after thrust cuts out
                         if (MissileState == MissileStates.PostThrust)
                         {
-                            var clampedTurnRate = Mathf.Clamp(maxTurnRateDPS - ((cruiseRangeTrigger < 0 ? (TimeIndex - dropTime - boostTime - cruiseDelay - cruiseTime) : (Time.time - cruiseStartTime - cruiseTime)) * 0.45f),
+                            var clampedTurnRate = Mathf.Clamp(maxTurnRateDPS - ((ManagedMotor && postThrustStartTime >= 0f ? Time.time - postThrustStartTime : cruiseRangeTrigger < 0 ? (TimeIndex - dropTime - boostTime - cruiseDelay - cruiseTime) : (Time.time - cruiseStartTime - cruiseTime)) * 0.45f),
                                 1, maxTurnRateDPS);
                             turnRateDPS = clampedTurnRate;
 
@@ -2858,7 +2865,7 @@ namespace BDArmory.Weapons.Missiles
                             TargetAcquired = true;
                             radarTarget = scannedTargets[lockIndex];
                             targetVessel = radarTarget.targetInfo;
-                            TargetPosition = radarTarget.predictedPositionWithChaffFactor(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
+                            TargetPosition = RadarAimPoint(chaffEffectivity, chaffNotchVFac, chaffNotchRFac);
                             TargetVelocity = radarTarget.velocity;
                             TargetAcceleration = radarTarget.acceleration;
                             targetGPSCoords = VectorUtils.WorldPositionToGeoCoords(TargetPosition, vessel.mainBody);
@@ -2944,14 +2951,14 @@ namespace BDArmory.Weapons.Missiles
         {
             if (MissileState == MissileStates.PostThrust) return;
             if (weaponClass == WeaponClasses.SLW && vessel.altitude > 0) return; //#710, no torp thrust out of water
-            if (currentThrust * Throttle > 0)
+            if (currentThrust * Throttle * motorThrottle > 0)
             {
                 if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_MISSILES)
                 {
-                    debugString.AppendLine($"Missile thrust= {currentThrust * Throttle:F3} kN");
+                    debugString.AppendLine($"Missile thrust= {currentThrust * Throttle * motorThrottle:F3} kN");
                     debugString.AppendLine($"Missile mass= {part.mass * 1000f:F1} kg");
                 }
-                part.rb.AddRelativeForce(currentThrust * Throttle * Vector3.forward);
+                part.rb.AddRelativeForce(currentThrust * Throttle * motorThrottle * Vector3.forward);
             }
         }
 
@@ -2975,6 +2982,8 @@ namespace BDArmory.Weapons.Missiles
             yield return new WaitForSecondsFixed(cruiseDelay);
             if (cruiseRangeTrigger > 0)
                 yield return new WaitUntilFixed(checkCruiseRangeTrigger);
+            if (Motor == MotorMode.Pulse)
+                yield return new WaitUntilFixed(PulseReady); // The second pulse is held until it will burn out about at the intercept.
 
             if (cruiseStates != null) StartCoroutine(CruiseAnimRoutine());
             yield return StartCoroutine(CruiseRoutine());
@@ -3284,7 +3293,7 @@ namespace BDArmory.Weapons.Missiles
 
             if (useFuel) burnedFuelMass = boosterFuelMass;
 
-            if (cruiseRangeTrigger > 0 || cruiseDelay > 0)
+            if (cruiseRangeTrigger > 0 || cruiseDelay > 0 || Motor == MotorMode.Pulse)
             {
                 // Use the coast value until *after* the cruise stage starts
                 if (parsedMaxTorque[3] >= 0)
@@ -3334,7 +3343,7 @@ namespace BDArmory.Weapons.Missiles
                     }
             }
 
-            if (cruiseDelay > 0 || cruiseRangeTrigger > 0)
+            if (cruiseDelay > 0 || cruiseRangeTrigger > 0 || Motor == MotorMode.Pulse)
             {
                 currentThrust = 0;
             }
@@ -3353,8 +3362,13 @@ namespace BDArmory.Weapons.Missiles
             StartCruise();
             var wait = new WaitForFixedUpdate();
             cruiseStartTime = Time.time;
-            while (Time.time - cruiseStartTime < cruiseTime || (useFuel && burnedFuelMass < massToBurn))
+            while (ManagedMotor ? sustainUsed < cruiseTime : (Time.time - cruiseStartTime < cruiseTime || (useFuel && burnedFuelMass < massToBurn)))
             {
+                if (ManagedMotor)
+                {
+                    motorThrottle = SustainThrottleNow();
+                    sustainUsed += motorThrottle * Time.fixedDeltaTime;
+                }
                 if (!BDArmorySetup.GameIsPaused)
                 {
                     if (!audioSource.isPlaying || audioSource.clip != thrustAudio)
@@ -3378,11 +3392,11 @@ namespace BDArmory.Weapons.Missiles
                     //}
                     //else
                     //{
-                    burnedFuelMass = Mathf.Min(burnedFuelMass + Throttle * burnRate, massToBurn); // Other code was causing issues
+                    burnedFuelMass = Mathf.Min(burnedFuelMass + Throttle * motorThrottle * burnRate, massToBurn); // Other code was causing issues
                     //}
                 }
 
-                audioSource.volume = Throttle;
+                audioSource.volume = Throttle * motorThrottle;
 
                 //particleFx
                 using (var emitter = pEmitters.GetEnumerator())
@@ -3482,6 +3496,8 @@ namespace BDArmory.Weapons.Missiles
         void EndCruise()
         {
             MissileState = MissileStates.PostThrust;
+            postThrustStartTime = Time.time;
+            shotSustainEndTime = TimeIndex;
 
             currentThrust = 0f;
 
@@ -3765,7 +3781,9 @@ namespace BDArmory.Weapons.Missiles
                 DrawDebugLine(vessel.CoM + (part.rb.velocity * Time.fixedDeltaTime), TargetPosition);
 
                 float timeToImpact;
-                switch (GuidanceMode)
+                bool lawFlown = (GuidanceMode == GuidanceModes.AAMLead || GuidanceMode == GuidanceModes.AAMPure || GuidanceMode == GuidanceModes.PN || GuidanceMode == GuidanceModes.APN)
+                    && LawGuidance(ref aamTarget, ref currAoALimit);
+                if (!lawFlown) switch (GuidanceMode)
                 {
                     case GuidanceModes.APN:
                         {
@@ -3801,7 +3819,7 @@ namespace BDArmory.Weapons.Missiles
                             float tempPronavGain = pronavGain > 0 ? pronavGain : pronavGainCurve.Evaluate(Vector3.Distance(TargetPosition, vessel.CoM));
 
                             //aamTarget = MissileGuidance.GetAirToAirLoftTarget(TargetPosition, TargetVelocity, TargetAcceleration, vessel, targetAlt, LoftMaxAltitude, LoftRangeFac, LoftAltComp, LoftVelComp, LoftAngle, LoftTermAngle, terminalHomingRange, ref loftState, out float currTimeToImpact, out float rangeToTarget, optimumAirspeed);
-                            aamTarget = MissileGuidance.GetAirToAirLoftTarget(TargetPosition, TargetVelocity, TargetAcceleration, vessel, targetAlt, LoftMaxAltitude, LoftRangeFac, LoftVertVelComp, LoftVelComp, LoftAngle, LoftTermAngle, terminalHomingRange, GetManeuvergLimit(0), GetInvManeuvergLimit(0), ref loftState, out float currTimeToImpact, out currgLimit, out float rangeToTarget, homingModeTerminal, tempPronavGain, optimumAirspeed);
+                            aamTarget = MissileGuidance.GetAirToAirLoftTarget(TargetPosition + (AdvancedFlight ? SalvoOffset(TargetPosition - vessel.CoM) : Vector3.zero), TargetVelocity, TargetAcceleration, vessel, targetAlt, LoftMaxAltitude, LoftRangeFac, LoftVertVelComp, LoftVelComp, LoftAngle, LoftTermAngle, terminalHomingRange, GetManeuvergLimit(0), GetInvManeuvergLimit(0), ref loftState, out float currTimeToImpact, out currgLimit, out float rangeToTarget, homingModeTerminal, tempPronavGain, optimumAirspeed);
 
                             //float fac = (1 - (rangeToTarget - terminalHomingRange - 100f) / Mathf.Clamp(terminalHomingRange * 4f, 5000f, 25000f));
 
@@ -3861,6 +3879,9 @@ namespace BDArmory.Weapons.Missiles
                         }
                 }
 
+                // A lofted missile flies its own law once it has come down onto the target.
+                if (GuidanceMode == GuidanceModes.AAMLoft && loftState >= LoftStates.Terminal && LawGuidance(ref aamTarget, ref currAoALimit)) { currgLimit = -1f; gCommand = false; }
+
                 /*Vector3 forward = GetForwardTransform();
                 if (VectorUtils.Angle(aamTarget - vessel.CoM, forward) > maxOffBoresight)
                 {
@@ -3893,6 +3914,98 @@ namespace BDArmory.Weapons.Missiles
             }
 
         }
+
+        #region Homing laws and motor management
+        float motorThrottle = 1f, sustainUsed, postThrustStartTime = -1f;
+        bool sustainLit;
+        Vector3 lawLagAccel;
+        float lawTargetTurn = 50f;
+        const float lawLag = 0.4f; // s: the turn's lag behind the command (the flight replica's fitted value, ShotModel).
+        public const float MidcourseMinRange = 8000f;
+        const float midcourseMinRange = MidcourseMinRange, midcourseMinTime = 10f; // The energy midcourse is flown beyond this range and time to go.
+
+        /// <summary>Sustainer burnt so far (s at full thrust) and whether it has been started.</summary>
+        public float SustainUsed => sustainUsed;
+        public bool SustainLit => sustainLit;
+        bool ManagedMotor => Motor != MotorMode.Sustain;
+
+        /// <summary>The sustainer throttle for this tick (GuidanceLaws.SustainThrottle) from the missile's own view of the intercept.</summary>
+        float SustainThrottleNow()
+        {
+            double timeToGo = -1, targetSpeed = 0;
+            if (TargetAcquired && !HomingOnJam) // Homing on jamming there is no range, so no time to go: burn.
+            {
+                Vector3 rel = TargetPosition - vessel.CoM;
+                float range = rel.magnitude;
+                float closing = -Vector3.Dot(rel, TargetVelocity - vessel.Velocity()) / Mathf.Max(range, 1f);
+                if (closing > 1f) timeToGo = range / closing;
+                targetSpeed = TargetVelocity.magnitude;
+            }
+            bool wasLit = sustainLit;
+            float throttle = GuidanceLaws.SustainThrottle(Motor, minThrottle, cruiseTime - sustainUsed, timeToGo, vessel.srfSpeed, targetSpeed, ref sustainLit);
+            if (sustainLit && !wasLit) shotSustainLitTime = TimeIndex;
+            return throttle;
+        }
+        bool PulseReady() { SustainThrottleNow(); return sustainLit; }
+
+        /// <summary>
+        /// Fly the missile's homing law (guidanceLaw), the energy midcourse or a salvo offset: the turn they ask for becomes the angle of
+        /// attack that gives it, and the point steered at lies that far off the flight path. False when none of them applies now (the
+        /// config's own guidance flies).
+        /// </summary>
+        bool LawGuidance(ref Vector3 aamTarget, ref float currAoALimit)
+        {
+            if (!AdvancedFlight) return false;
+            Vector3 velocity = vessel.Velocity();
+            float speed = velocity.magnitude;
+            if (speed < 1f) return false;
+            Vector3 rel = TargetPosition - vessel.CoM, relVel = TargetVelocity - velocity;
+            float range = rel.magnitude;
+            if (range < 1f) return false;
+            float closing = -Vector3.Dot(rel, relVel) / range;
+            float timeToGo = closing > 1f ? range / closing : -1f;
+            bool midcourse = energyMidcourse && !HomingOnJam && range > midcourseMinRange && timeToGo > midcourseMinTime;
+            Vector3 offset = SalvoOffset(rel);
+            if (Law == GuidanceLaw.Config && !midcourse && offset == Vector3.zero && !HomingOnJam) return false;
+            var law = HomingOnJam || midcourse || Law == GuidanceLaw.Config ? GuidanceLaw.ProNav : Law;
+
+            rel += offset; // Aim to one side of the target, by less and less as it nears, to come in on a different bearing from the salvo's others.
+
+            Vector3 u = velocity / speed;
+            var spec = BDArmory.Control.ShotModel.Spec(this);
+            float q = 0.5f * (float)vessel.atmDensity * speed * speed;
+            float thrust = MissileState == MissileStates.PostThrust ? 0f : currentThrust * Throttle * motorThrottle;
+            float cap = q > 1f ? BDArmory.Control.MissileFlyout.BestAoA(spec, q, thrust) : maxAoA;
+            if (midcourse) { cap = Mathf.Min(cap, MissileGuidance.AoALDMax); ++shotMidcourseTicks; }
+            float mass = Mathf.Max(spec.mass, 1e-4f);
+            float turnMax = (q * spec.liftArea * spec.liftMultiplier * BDArmory.Control.MissileFlyout.Lift(cap) + thrust * Mathf.Sin(cap * Mathf.Deg2Rad)) / mass;
+
+            lawTargetTurn = Mathf.Clamp(Mathf.Max(lawTargetTurn - 2f * Time.fixedDeltaTime, TargetAcceleration.magnitude), 50f, 120f); // The hardest turn seen of it lately.
+            TargetAccelMovingAverage.Update(TargetAcceleration, 0.15f);
+            Vector3 targetAccel = law == GuidanceLaw.Optimal ? TargetAccelMovingAverage.Value : Vector3.zero;
+            var state = new GuidanceLaws.State
+            {
+                rx = rel.x, ry = rel.y, rz = rel.z, vx = relVel.x, vy = relVel.y, vz = relVel.z,
+                tax = targetAccel.x, tay = targetAccel.y, taz = targetAccel.z, max = lawLagAccel.x, may = lawLagAccel.y, maz = lawLagAccel.z,
+                ux = u.x, uy = u.y, uz = u.z, lag = lawLag, missileMax = turnMax, targetMax = lawTargetTurn, navigation = pronavGain > 0 ? pronavGain : 3f
+            };
+            if (!GuidanceLaws.Command(law, state, out double ax, out double ay, out double az, out double lawTimeToGo)) return false;
+            Vector3 turn = new Vector3((float)ax, (float)ay, (float)az);
+            if (HomingOnJam && closing > 1f) turn *= Mathf.Clamp(speed / closing, 0.5f, 2f); // Without range the closing speed is taken to be the missile's own.
+            turn -= (Vector3)FlightGlobals.getGeeForceAtPosition(vessel.CoM); // Hold the flight path up against gravity.
+            turn = turn.ProjectOnPlanePreNormalized(u);
+            if (turn.magnitude > turnMax) turn *= turnMax / turn.magnitude;
+            lawLagAccel += (turn - lawLagAccel) * Mathf.Min(1f, Time.fixedDeltaTime / lawLag);
+
+            float aoa = q > 1f ? BDArmory.Control.MissileFlyout.AoAForLateral(spec, q, thrust, turn.magnitude, cap) : 0f;
+            Vector3 direction = turn.sqrMagnitude > 1e-6f ? Mathf.Cos(aoa * Mathf.Deg2Rad) * u + Mathf.Sin(aoa * Mathf.Deg2Rad) * turn.normalized : u;
+            aamTarget = vessel.CoM + 1000f * direction;
+            currAoALimit = cap;
+            TimeToImpact = (float)lawTimeToGo;
+            if (!midcourse) ++shotLawTicks;
+            return true;
+        }
+        #endregion
 
         void AGMGuidance()
         {

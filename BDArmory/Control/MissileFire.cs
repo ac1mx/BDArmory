@@ -2497,6 +2497,8 @@ namespace BDArmory.Control
                     GUIUtils.DrawTextureOnScreenPos(_HMDscreenPos, BDArmorySetup.Instance.greenCircleTexture, new Vector2(36, 36), 0);
                 }
 
+                DrawCues();
+
                 if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_MISSILES || BDArmorySettings.DEBUG_WEAPONS)
                     debugString.Length = 0;
                 int lineCount = 0;

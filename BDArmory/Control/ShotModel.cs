@@ -20,9 +20,9 @@ namespace BDArmory.Control
     /// </summary>
     public static class ShotModel
     {
-        public static readonly string[] FeatureNames = { "bias", "reaches", "escapeReaches", "energyMargin", "flightTime", "hot", "cold", "offBoresight", "heat", "launcherGuided", "lateralG", "low" };
+        public static readonly string[] FeatureNames = { "bias", "reaches", "escapeReaches", "energyMargin", "flightTime", "hot", "cold", "offBoresight", "heat", "launcherGuided", "lateralG", "low", "reach", "offNose" };
         // Until fitted: start from what the flight prediction says, tempered by the geometry.
-        static readonly float[] defaultWeights = { -1.2f, 1.6f, 1.0f, 0.5f, -0.3f, 0.0f, -0.3f, -1.5f, 0.4f, -0.6f, 0.2f, -0.3f };
+        static readonly float[] defaultWeights = { -1.2f, 1.6f, 1.0f, 0.5f, -0.3f, 0.0f, -0.3f, -1.5f, 0.4f, -0.6f, 0.2f, -0.3f, -1.5f, -1.0f };
         static float[] weights = (float[])defaultWeights.Clone();
         static readonly Dictionary<string, float> missileBias = new Dictionary<string, float>();
         static bool loaded;
@@ -33,13 +33,20 @@ namespace BDArmory.Control
             public bool valid;
             public MissileFlyout.Result straight, escape;
             public float aspect, offBoresightFraction, launcherGuidedFraction, energyMargin;
+            /// <summary>
+            /// The distance the missile has to make up itself while its motor burns (range less what the closing speed covers in that
+            /// time), as a share of what it flies under power at its optimum speed: past about 1 it arrives coasting and slow.
+            /// </summary>
+            public float reach;
+            /// <summary>How far past 45° off the missile's nose the target is, in units of 45°: the turn the missile spends its motor on.</summary>
+            public float offNose;
             public bool heat;
             public float[] Vector(bool low)
             {
                 return new float[] {
                     1f, straight.reached ? 1f : 0f, escape.reached ? 1f : 0f, energyMargin, straight.time / 30f,
                     aspect < hotAspect ? 1f : 0f, aspect > coldAspect ? 1f : 0f, offBoresightFraction, heat ? 1f : 0f, launcherGuidedFraction,
-                    Mathf.Min(straight.lateralG, 40f) / 10f, low ? 1f : 0f };
+                    Mathf.Min(straight.lateralG, 40f) / 10f, low ? 1f : 0f, reach, offNose };
             }
         }
 
@@ -67,8 +74,21 @@ namespace BDArmory.Control
         }
 
         #region Flight prediction inputs
-        public static MissileSpec Spec(MissileLauncher ml) => new MissileSpec
+        public static MissileSpec Spec(MissileLauncher ml)
         {
+            ml.EnsureAdvancedFlight();
+            return SpecOf(ml);
+        }
+        static MissileSpec SpecOf(MissileLauncher ml) => new MissileSpec
+        {
+            law = ml.Law,
+            // A lofted missile flies its law once it has come down on the target, one with an energy midcourse once that is over.
+            lawRange = ml.GuidanceMode == MissileBase.GuidanceModes.AAMLoft ? ml.terminalHomingRange : ml.energyMidcourse && ml.AdvancedFlight ? MissileLauncher.MidcourseMinRange : 0f,
+            targetMax = 80f,
+            motor = ml.Motor,
+            minThrottle = ml.minThrottle,
+            sustainUsed = ml.SustainUsed,
+            sustainLit = ml.SustainLit,
             mass = ml.part != null ? ml.part.mass : 0.1f,
             thrust = ml.thrust,
             boostTime = ml.boostTime,
@@ -122,7 +142,7 @@ namespace BDArmory.Control
         /// Features of a shot from where the missile is now (on its rail or just launched) at the target, or, with lead > 0, of the same
         /// shot taken lead seconds later with both craft carrying straight on.
         /// </summary>
-        public static Features Compute(MissileBase missile, Vessel from, Vessel target, float lead = 0f, bool pointed = false)
+        public static Features Compute(MissileBase missile, Vessel from, Vessel target, float lead = 0f, bool pointed = false, float pitchUp = 0f, float climb = 0f)
         {
             var features = new Features();
             if (missile is not MissileLauncher ml || from == null || target == null) return features;
@@ -143,6 +163,14 @@ namespace BDArmory.Control
             float gravity = (float)(body.GeeASL * PhysicsGlobals.GravitationalAcceleration);
             float speedOfSound = from.speedOfSound > 0 ? (float)from.speedOfSound : 300f;
             double altitude = FlightGlobals.getAltitudeAtPos(origin, body);
+            if (climb != 0f) { relative.z -= climb; altitude += climb; } // Launched from that much higher.
+            if (pitchUp > 0f)
+            {
+                // Launched with the nose that far above the line to the target.
+                Vector3 level = new Vector3(relative.x, relative.y, 0f);
+                float elevation = Mathf.Atan2(relative.z, level.magnitude) + pitchUp * Mathf.Deg2Rad;
+                velocity = velocity.magnitude * (Mathf.Cos(elevation) * level.normalized + Mathf.Sin(elevation) * Vector3.forward);
+            }
             features.straight = MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, relative.x, relative.y, relative.z, targetVelocity.x, targetVelocity.y, targetVelocity.z, 0, 0, 0,
                 Math.Max(target.srfSpeed, 1.0), altitude, densityFunction, gravity, speedOfSound);
             // The target turns its back on the launch and runs, speeding up by a quarter.
@@ -154,7 +182,12 @@ namespace BDArmory.Control
             float kinematic = MissileFlyout.KinematicSpeed(spec, Density(altitude), gravity, speedOfSound);
             features.energyMargin = Mathf.Clamp(Mathf.Log(Mathf.Max(features.straight.speed, 1f) / Mathf.Max(kinematic, 50f)), -1f, 2f);
             features.aspect = VectorUtils.Angle(target.srf_vel_direction, -line);
-            features.offBoresightFraction = pointed ? 0f : Mathf.Clamp(VectorUtils.Angle(missile.GetForwardTransform(), line) / Mathf.Clamp(missile.maxOffBoresight, 1f, 180f), 0f, 2f);
+            features.offBoresightFraction = pointed ? Mathf.Clamp(pitchUp / Mathf.Clamp(missile.maxOffBoresight, 1f, 180f), 0f, 2f)
+                : Mathf.Clamp(VectorUtils.Angle(missile.GetForwardTransform(), line) / Mathf.Clamp(missile.maxOffBoresight, 1f, 180f), 0f, 2f);
+            float burnTime = Mathf.Max(ml.boostTime + ml.cruiseTime, 1f);
+            float closure = Vector3.Dot(from.Velocity() - target.Velocity(), line);
+            features.reach = Mathf.Clamp((range - closure * burnTime) / (Mathf.Max(ml.optimumAirspeed, 100f) * burnTime), -1f, 3f);
+            features.offNose = pointed ? 0f : Mathf.Clamp((VectorUtils.Angle(missile.GetForwardTransform(), line) - 45f) / 45f, 0f, 3f);
             features.heat = missile.TargetingMode == MissileBase.TargetingModes.Heat;
             features.launcherGuidedFraction = (missile.TargetingMode == MissileBase.TargetingModes.Radar || missile.TargetingMode == MissileBase.TargetingModes.Inertial)
                 ? Mathf.Clamp01(1f - missile.activeRadarRange / range) : 0f;
@@ -182,6 +215,67 @@ namespace BDArmory.Control
             float speedOfSound = v.speedOfSound > 0 ? (float)v.speedOfSound : 300f;
             return MissileFlyout.Fly(Spec(ml), velocity.x, velocity.y, velocity.z, relative.x, relative.y, relative.z, tv.x, tv.y, tv.z, ta.x, ta.y, ta.z,
                 Mathf.Max(targetMaxSpeed, tv.magnitude), v.altitude, densityFunction, gravity, speedOfSound, dt: 0.2f, maxTime: 60f, elapsed: ml.TimeIndex);
+        }
+
+        /// <summary>
+        /// One edge of a missile's launch zone along the present line from the shooter to the target, the shooter's nose on it: the
+        /// longest range (m) from which it still reaches the target flying on as it is (maximum range), or, with escape, the target
+        /// turning away at launch and running (no-escape range). Searched outwards or inwards from start, to about a tenth; 0 if it
+        /// reaches from nowhere on the line.
+        /// </summary>
+        public static float ZoneRange(MissileBase missile, Vessel from, Vessel target, bool escape, float start)
+        {
+            if (missile is not MissileLauncher ml || from == null || target == null) return 0f;
+            var body = from.mainBody;
+            EnsureDensityTable(body);
+            Vector3 origin = missile.transform.position;
+            Vector3 up = (origin - (Vector3)body.position).normalized;
+            Vector3 north = Vector3.ProjectOnPlane(body.transform.up, up).normalized;
+            Vector3 east = Vector3.Cross(up, north);
+            Vector3 line = Local(target.CoM - origin, east, north, up).normalized, tv = Local(target.Velocity(), east, north, up);
+            Vector3 velocity = Mathf.Max((float)from.srfSpeed, 50f) * line;
+            var spec = Spec(ml);
+            float gravity = (float)(body.GeeASL * PhysicsGlobals.GravitationalAcceleration);
+            float speedOfSound = from.speedOfSound > 0 ? (float)from.speedOfSound : 300f;
+            double altitude = FlightGlobals.getAltitudeAtPos(origin, body);
+            float targetSpeed = Mathf.Max((float)target.srfSpeed, 50f);
+            Vector3 away = new Vector3(line.x, line.y, 0f).normalized;
+            bool Reaches(float range)
+            {
+                Vector3 rel = range * line;
+                if (!escape)
+                    return MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, rel.x, rel.y, rel.z, tv.x, tv.y, tv.z, 0, 0, 0, Math.Max(targetSpeed, 1.0), altitude, densityFunction, gravity, speedOfSound, dt: 0.2f).reached;
+                return MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, rel.x, rel.y, rel.z, targetSpeed * away.x, targetSpeed * away.y, 0, 10f * away.x, 10f * away.y, 0,
+                    1.25 * targetSpeed, altitude, densityFunction, gravity, speedOfSound, dt: 0.2f).reached;
+            }
+            float lo, hi;
+            start = Mathf.Clamp(start, 1000f, 150000f);
+            if (Reaches(start))
+            {
+                lo = start; hi = 0f;
+                for (int i = 0; i < 6 && hi == 0f; ++i) { float next = 1.5f * lo; if (next > 250000f) return lo; if (Reaches(next)) lo = next; else hi = next; }
+                if (hi == 0f) return lo;
+            }
+            else
+            {
+                hi = start; lo = 0f;
+                for (int i = 0; i < 8 && lo == 0f; ++i) { float next = 0.65f * hi; if (next < 500f) return 0f; if (Reaches(next)) lo = next; else hi = next; }
+                if (lo == 0f) return 0f;
+            }
+            for (int i = 0; i < 3; ++i) { float mid = 0.5f * (lo + hi); if (Reaches(mid)) lo = mid; else hi = mid; }
+            return lo;
+        }
+
+        /// <summary>
+        /// The chance of the shot taken with the nose pitchUp degrees above the line to the target, from climb metres higher: what the
+        /// pilot could give the missile by lofting the launch and by climbing first.
+        /// </summary>
+        public static float EstimateAssisted(MissileBase missile, Vessel from, Vessel target, float pitchUp, float climb)
+        {
+            if (!loaded) Load();
+            var features = Compute(missile, from, target, 0f, true, pitchUp, climb);
+            if (!features.valid) return -1f;
+            return Logistic(features.Vector(from.radarAltitude + climb < lowAltitude), missile.part != null && missile.part.partInfo != null ? missile.part.partInfo.name : null);
         }
 
         static float Logistic(float[] x, string part)
@@ -215,9 +309,9 @@ namespace BDArmory.Control
 
         /// <summary>Key=value fields describing the features, for the shot record.</summary>
         public static string Describe(in Features f) => !f.valid ? "flyout=none" : string.Format(CultureInfo.InvariantCulture,
-            "flyReaches={0} flyTime={1:F1} flyMiss={2:F0} flySpeed={3:F0} flyG={4:F1} flyGaveUp={5} escReaches={6} escTime={7:F1} escMiss={8:F0} energyMargin={9:F2} offBoresightFraction={10:F2} launcherGuided={11:F2}",
+            "flyReaches={0} flyTime={1:F1} flyMiss={2:F0} flySpeed={3:F0} flyG={4:F1} flyGaveUp={5} escReaches={6} escTime={7:F1} escMiss={8:F0} energyMargin={9:F2} offBoresightFraction={10:F2} launcherGuided={11:F2} reach={12:F2} offNose={13:F2}",
             f.straight.reached, f.straight.time, f.straight.missDistance, f.straight.speed, f.straight.lateralG, f.straight.gaveUp,
-            f.escape.reached, f.escape.time, f.escape.missDistance, f.energyMargin, f.offBoresightFraction, f.launcherGuidedFraction);
+            f.escape.reached, f.escape.time, f.escape.missDistance, f.energyMargin, f.offBoresightFraction, f.launcherGuidedFraction, f.reach, f.offNose);
 
         #region Legacy model (modular missiles)
         // bias, range per 10 km, target coming at us, target running away, degrees off the missile's nose per 45, heat seeker, launched below 500 m.

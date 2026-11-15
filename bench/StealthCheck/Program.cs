@@ -188,6 +188,26 @@ static class Program
             Check(immune > 0f && immune < beam1 && StealthMath.ChaffSeduction(0.3f, 0f, 0f, 1f, 1f) == 0f, "chaff-immune missiles are floored, not immune; 0 with the floor off");
         }
 
+        // ---- smart seekers: the same release in the same geometry always ends the same way ----
+        {
+            const float gate = 50f, floor = 0.15f;
+            float beam2 = StealthMath.ChaffPull(1, 1f, floor, 0f, gate, 2f), beam30 = StealthMath.ChaffPull(1, 1f, floor, 0f, gate, 30f);
+            float crank = StealthMath.ChaffPull(4, 1f, floor, 300f * MathF.Sin(MathF.PI / 4f), gate, 2f), edge = StealthMath.ChaffPull(1, 1f, floor, 62.5f, gate, 2f);
+            Console.WriteLine($"   smart chaff pull per bundle: 2 m² in the gate {beam2:F2}, 30 m² in the gate {beam30:F2}, 2 m² at 62 m/s along the line {edge:F2}; four bundles cranking 45° {crank:F2}");
+            Check(beam2 >= 1f && 3 * beam30 < 1f && 4 * beam30 >= 1f && StealthMath.ChaffBundlesNeeded(0f, beam30) == 4 && StealthMath.ChaffBundlesNeeded(0f, crank) == 0,
+                  "one bundle takes the track of a 2 m² craft in the gate; a 30 m² craft needs four together; none does outside the gate");
+            Check(StealthMath.FlareReleased(2f, 1f, 1.5f, false, 30f, 2f) && !StealthMath.FlareReleased(1.2f, 1f, 1.5f, false, 1f, 2f) && StealthMath.FlareReleased(1.2f, 1f, 1.5f, true, 7f, 2f) && !StealthMath.FlareReleased(1.2f, 1f, 1.5f, true, 9f, 2f),
+                  "a seeker on a flare goes back to a craft that outshines it, or a close one within four track gates of the flare");
+            Check(crank == 0f && edge > 0f && edge < beam2, "chaff outside the velocity gate has no pull at all, and fades across the gate's edge");
+            Check(StealthMath.ChaffHold(1f, false) == 1.5f && StealthMath.ChaffHold(5f, false) == 3.5f && StealthMath.ChaffHold(5f, true) < 1f, "a bloom holds the track 1.5-3.5 s by its margin, under a second with a data link re-cue");
+            float dim = StealthMath.FlarePullRate(0.9f, 1.5f, 1f, floor), bright = StealthMath.FlarePullRate(3f, 1.5f, 1f, floor), old = StealthMath.FlarePullRate(0.9f, 0.7f, 1f, floor);
+            Console.WriteLine($"   smart flare pull per second: 0.9× vs rejection 1.5 {dim:F2}, 3× vs 1.5 {bright:F2}, 0.9× vs 0.7 {old:F2}");
+            Check(dim == 0f && bright > 0f && old > 0f && old < bright && StealthMath.FlarePullRate(50f, 1.5f, 1f, floor) == bright,
+                  "a flare dimmer than the seeker rejects never pulls it; brighter ones pull faster, up to twice the rejection");
+            Check(Math.Abs(1f / bright - StealthMath.FlareDwell) < 1e-4f, "a flare twice what the seeker rejects takes the track after FlareDwell in the gate");
+            Check(StealthMath.PullAfter(1f, StealthMath.PullDecay) < 0.37f && StealthMath.PullAfter(1f, 0f) == 1f, "gathered pull fades between releases");
+        }
+
         // ---- skin reflectivity: hull material under armour ----
         {
             const float foam = 0.01f, rac = 0.1f, steel = 1f, glass = 1.2f;
