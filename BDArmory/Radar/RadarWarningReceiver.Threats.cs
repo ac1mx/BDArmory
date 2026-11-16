@@ -24,6 +24,8 @@ namespace BDArmory.Radar
             public Vessel vessel;
             public RWRThreatTypes type;
             public string radar;            // The emitting radar's name (the receiver's identification of it).
+            public float detectability = 1f; // Its radar's rwrDetectability: below 1 (low probability of intercept) it takes longer to classify.
+            public string code;             // Threat library code, once classified.
             public bool friendly = true, missile; // Friendly until its side is known to be hostile.
             public Vector3 position;        // Where it was when last heard.
             public float firstHeard, lastHeard, lockHeard = -100f, launchHeard = -100f, reported = -100f;
@@ -98,7 +100,7 @@ namespace BDArmory.Radar
             e.position = source;
             e.lastHeard = Time.time;
             UpdateSide(e);
-            if (pingRadar != null) e.radar = pingRadar.radarName;
+            if (pingRadar != null) { e.radar = pingRadar.radarName; e.detectability = pingRadar.rwrDetectability; }
             if (type == RWRThreatTypes.MissileLock || type == RWRThreatTypes.TorpedoLock) { e.missile = true; return; }
             if (type == RWRThreatTypes.MissileLaunch || type == RWRThreatTypes.Torpedo) return; // A seeker going active: the missile lock pings follow.
             if (!pingIsLock) return;
@@ -174,6 +176,46 @@ namespace BDArmory.Radar
             }
             return top;
         }
+
+        #region Display
+        const float classifyTime = 3f;
+
+        /// <summary>
+        /// The receiver's symbol for an emitter: a fighter radar is matched against the threat library to its craft's code (ScopeComposer.
+        /// ThreatCode) once heard for classifyTime, longer for a radar hard to intercept, and at once when it locks; until then it is U
+        /// (unknown). Other emitters keep their type's letter.
+        /// </summary>
+        internal string Symbol(Emitter e, RWRThreatTypes type)
+        {
+            string letter = iconLabels[(int)type];
+            if (type != RWRThreatTypes.Fighter || e == null || e.vessel == null) return letter;
+            if (e.code == null)
+            {
+                if (e.State < EmitterStates.Lock && Time.time - e.firstHeard < classifyTime / Mathf.Clamp(e.detectability, 0.25f, 1f)) return "U";
+                e.code = ScopeComposer.ThreatCode(e.vessel.vesselName);
+            }
+            return e.code;
+        }
+
+        /// <summary>The status strip under the scope: the top threat once it locks or launches, else how many emitters are heard.</summary>
+        (string text, EmitterState state) StatusLine()
+        {
+            var top = TopThreat();
+            if (top != null && top.State >= EmitterStates.Lock && top.vessel != null)
+            {
+                int locks = LockCount();
+                return ($"{(top.State == EmitterStates.Launch ? "LAUNCH" : "LOCK")} · {Symbol(top, top.type)} · {EstimatedRange(top) / 1000f:0} km{(locks > 1 ? $" · +{locks - 1}" : "")}",
+                    top.State == EmitterStates.Launch ? EmitterState.Launch : EmitterState.Lock);
+            }
+            int heard = 0;
+            for (int i = 0; i < emitters.Count; ++i) if (!emitters[i].missile && emitters[i].vessel != null) ++heard;
+            return (heard > 0 ? $"{heard} EMITTER{(heard > 1 ? "S" : "")}" : null, EmitterState.Search);
+        }
+
+        /// <summary>How the scope shows an emitter's state.</summary>
+        static EmitterState DisplayState(Emitter e) =>
+            e == null ? EmitterState.Search : e.State >= EmitterStates.Launch ? EmitterState.Launch : e.State == EmitterStates.Lock ? EmitterState.Lock : EmitterState.Search;
+        #endregion
 
         /// <summary>Hostile craft the receiver hears holding a lock on us or having launched on one.</summary>
         public int LockCount()

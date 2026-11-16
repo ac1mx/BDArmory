@@ -89,12 +89,6 @@ namespace BDArmory.Radar
             (16 * BDArmorySettings.RWR_WINDOW_SCALE),
             (16 * BDArmorySettings.RWR_WINDOW_SCALE));
 
-        public static Texture2D rwrDiamondTexture =
-            GameDatabase.Instance.GetTexture(BDArmorySetup.textureDir + "rwrDiamond", false);
-
-        public static Texture2D rwrMissileTexture =
-            GameDatabase.Instance.GetTexture(BDArmorySetup.textureDir + "rwrMissileIcon", false);
-
         public static AudioClip radarPingSound;
         public static AudioClip missileLockSound;
         public static AudioClip missileLaunchSound;
@@ -140,8 +134,9 @@ namespace BDArmory.Radar
         }
 
         internal static Rect RwrDisplayRect = new Rect(0, 0, RwrSize * BDArmorySettings.RWR_WINDOW_SCALE, RwrSize * BDArmorySettings.RWR_WINDOW_SCALE);
+        /// <summary>The status strip under the scope (top threat, emitters heard).</summary>
+        internal static float StatusHeight => ScopeComposer.RwrStatusHeight * Mathf.Max(1f, BDArmorySettings.RWR_WINDOW_SCALE);
 
-        GUIStyle rwrIconLabelStyle;
 
         AudioSource audioSource;
         public static bool WindowRectRWRInitialized;
@@ -168,17 +163,6 @@ namespace BDArmory.Radar
             launchWarnings = new RWRSignatureData[2 * dataCount]; //new List<TargetSignatureData>();
             missileLockData = new RWRSignatureData[2 * dataCount];
 
-            rwrIconLabelStyle = new GUIStyle
-            {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 12,
-                border = new RectOffset(0, 0, 0, 0),
-                clipping = TextClipping.Overflow,
-                wordWrap = false,
-                fontStyle = FontStyle.Bold,
-                normal = new GUIStyleState { textColor = Color.green }
-            };
-
             audioSource = gameObject.AddComponent<AudioSource>();
             audioSource.minDistance = 500;
             audioSource.maxDistance = 1000;
@@ -191,7 +175,7 @@ namespace BDArmory.Radar
 
             if (!WindowRectRWRInitialized)
             {
-                BDArmorySetup.WindowRectRwr = new Rect(BDArmorySetup.WindowRectRwr.x, BDArmorySetup.WindowRectRwr.y, RwrDisplayRect.height + BorderSize, RwrDisplayRect.height + BorderSize + HeaderSize);
+                BDArmorySetup.WindowRectRwr = new Rect(BDArmorySetup.WindowRectRwr.x, BDArmorySetup.WindowRectRwr.y, RwrDisplayRect.height + BorderSize, RwrDisplayRect.height + BorderSize + HeaderSize + StatusHeight);
                 // BDArmorySetup.WindowRectRwr = new Rect(40, Screen.height - RwrDisplayRect.height, RwrDisplayRect.height + BorderSize, RwrDisplayRect.height + BorderSize + HeaderSize);
                 WindowRectRWRInitialized = true;
             }
@@ -699,7 +683,7 @@ namespace BDArmory.Radar
             if (resizingWindow && Event.current.type == EventType.MouseUp) { resizingWindow = false; }
 
             if (BDArmorySettings.UI_SCALE_ACTUAL != 1) GUIUtility.ScaleAroundPivot(BDArmorySettings.UI_SCALE_ACTUAL * Vector2.one, BDArmorySetup.WindowRectRwr.position);
-            BDArmorySetup.WindowRectRwr = GUI.Window(94353, BDArmorySetup.WindowRectRwr, WindowRwr, "Radar Warning Receiver", GUI.skin.window);
+            BDArmorySetup.WindowRectRwr = GUI.Window(94353, BDArmorySetup.WindowRectRwr, WindowRwr, "Radar Warning Receiver", BDArmorySetup.BDGuiSkin.window);
         }
 
         internal void WindowRwr(int windowID)
@@ -709,28 +693,29 @@ namespace BDArmory.Radar
                 displayRWR = false;
                 BDArmorySetup.SaveConfig();
             }
-            GUI.BeginGroup(new Rect(BorderSize / 2, HeaderSize + (BorderSize / 2), RwrDisplayRect.width, RwrDisplayRect.height));
+            GUI.BeginGroup(new Rect(BorderSize / 2, HeaderSize + (BorderSize / 2), RwrDisplayRect.width, RwrDisplayRect.height + StatusHeight));
 
-            GUI.DrawTexture(RwrDisplayRect, VesselRadarData.omniBgTexture, ScaleMode.StretchToFill, false);
-            float pingSize = 32 * BDArmorySettings.RWR_WINDOW_SCALE;
+            var canvas = ImguiScopeCanvas.Instance;
+            var display = new ScopeRect(RwrDisplayRect.x, RwrDisplayRect.y, RwrDisplayRect.width, RwrDisplayRect.height);
+            float scale = BDArmorySettings.RWR_WINDOW_SCALE;
+            ScopeComposer.Background(canvas, ScopeImage.RwrScope, display);
+            bool blink = (Time.unscaledTime * 3f) % 1f < 0.6f;
 
             for (int i = 0; i < pingsData.Length; i++)
             {
                 RWRSignatureData currPing = pingsData[i];
                 if (!currPing.exists) continue;
-                Vector2 pingPosition = currPing.pingPosition;
-                //pingPosition = Vector2.MoveTowards(displayRect.center, pingPosition, displayRect.center.x - (pingSize/2));
-                Rect pingRect = new Rect(pingPosition.x - (pingSize / 2), pingPosition.y - (pingSize / 2), pingSize,
-                    pingSize);
-
+                var p = ScopeComposer.ClearOfOwnShip(display, new ScopePoint(currPing.pingPosition.x, currPing.pingPosition.y), scale);
                 if (currPing.signalType == RWRThreatTypes.MissileLock || currPing.signalType == RWRThreatTypes.MWS)
                 {
-                    GUI.DrawTexture(pingRect, rwrMissileTexture, ScaleMode.StretchToFill, true);
+                    ScopeComposer.Missile(canvas, display, p, blink, scale);
                 }
                 else
                 {
-                    GUI.DrawTexture(pingRect, rwrDiamondTexture, ScaleMode.StretchToFill, true);
-                    GUI.Label(pingRect, iconLabels[(int)currPing.signalType], rwrIconLabelStyle);
+                    // The receiver's picture of the emitter: its letter, a hat when airborne, a diamond while it locks us, a flashing ring once it launches.
+                    var emitter = EmitterOf(currPing.vessel);
+                    bool airborne = currPing.vessel != null && !currPing.vessel.LandedOrSplashed;
+                    ScopeComposer.Emitter(canvas, p, Symbol(emitter, currPing.signalType), DisplayState(emitter), emitter != null && emitter.friendly, airborne, blink, scale);
                 }
             }
 
@@ -746,12 +731,7 @@ namespace BDArmory.Radar
 
                 Vector2 pingPosition = missileLockData[index].pingPosition;
                 ++index;
-
-                //pingPosition = Vector2.MoveTowards(displayRect.center, pingPosition, displayRect.center.x - (pingSize/2));
-                Rect pingRect = new Rect(pingPosition.x - (pingSize / 2), pingPosition.y - (pingSize / 2), pingSize,
-                    pingSize);
-
-                GUI.DrawTexture(pingRect, rwrMissileTexture, ScaleMode.StretchToFill, true);
+                ScopeComposer.Missile(canvas, display, ScopeComposer.ClearOfOwnShip(display, new ScopePoint(pingPosition.x, pingPosition.y), scale), blink, scale);
             }
 
             // Tell the compiler to not worry about bounds checking
@@ -760,11 +740,7 @@ namespace BDArmory.Radar
                 // Actual end of for loop
                 if (i + 1 > MWSSlots) break;
                 Vector2 pingPosition = MWSData[i].pingPosition;
-                //pingPosition = Vector2.MoveTowards(displayRect.center, pingPosition, displayRect.center.x - (pingSize/2));
-                Rect pingRect = new Rect(pingPosition.x - (pingSize / 2), pingPosition.y - (pingSize / 2), pingSize,
-                    pingSize);
-
-                GUI.DrawTexture(pingRect, rwrMissileTexture, ScaleMode.StretchToFill, true);
+                ScopeComposer.Missile(canvas, display, ScopeComposer.ClearOfOwnShip(display, new ScopePoint(pingPosition.x, pingPosition.y), scale), blink, scale);
             }
 
             index = _launchWarningsHead;
@@ -775,12 +751,10 @@ namespace BDArmory.Radar
 
                 Vector2 pingPosition = launchWarnings[index].pingPosition;
                 ++index;
-
-                //pingPosition = Vector2.MoveTowards(displayRect.center, pingPosition, displayRect.center.x - (pingSize/2));
-                Rect pingRect = new Rect(pingPosition.x - (pingSize / 2), pingPosition.y - (pingSize / 2), pingSize,
-                    pingSize);
-                GUI.DrawTexture(pingRect, rwrMissileTexture, ScaleMode.StretchToFill, true);
+                ScopeComposer.Missile(canvas, display, ScopeComposer.ClearOfOwnShip(display, new ScopePoint(pingPosition.x, pingPosition.y), scale), blink, scale);
             }
+            var (status, statusState) = StatusLine();
+            ScopeComposer.RwrStatus(canvas, new ScopeRect(display.x, display.y + display.h, display.w, StatusHeight), status, statusState, scale);
             GUI.EndGroup();
 
             // Resizing code block.

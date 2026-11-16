@@ -555,6 +555,7 @@ namespace BDArmory.UI
 
         void ConfigureStyles()
         {
+            if (BDGuiSkin == null || BDGuiSkin.name != "BDArmory") BDGuiSkin = ScopeArt.BuildSkin(HighLogic.Skin);
             centerLabel = new GUIStyle
             {
                 alignment = TextAnchor.UpperCenter,
@@ -4487,7 +4488,7 @@ namespace BDArmory.UI
             BDArmorySetup.WindowRectRwr =
               new Rect(BDArmorySetup.WindowRectRwr.x, BDArmorySetup.WindowRectRwr.y,
                 RadarWarningReceiver.RwrDisplayRect.height + RadarWarningReceiver.BorderSize,
-                RadarWarningReceiver.RwrDisplayRect.height + RadarWarningReceiver.BorderSize + RadarWarningReceiver.HeaderSize);
+                RadarWarningReceiver.RwrDisplayRect.height + RadarWarningReceiver.BorderSize + RadarWarningReceiver.HeaderSize + RadarWarningReceiver.StatusHeight);
         }
 
         internal static void ResizeRadarWindow(float radarScale)

@@ -90,7 +90,7 @@ namespace BDArmory.Control
             return action != null ? head + " · " + action : head;
         }
 
-        /// <summary>The warning receiver's top threat once it is more than a search sweep: who holds a lock on us or has launched, where, and about how far.</summary>
+        /// <summary>The warning receiver's top threat once it is more than a search sweep: its threat code, where, and about how far.</summary>
         string RwrCue()
         {
             if (rwr == null || !rwr.rwrEnabled) return null;
@@ -100,7 +100,7 @@ namespace BDArmory.Control
             int clock = Mathf.RoundToInt(Vector3.SignedAngle(heading, toIt, up) / 30f);
             clock = ((clock % 12) + 12) % 12;
             int locks = rwr.LockCount();
-            return FormattableString.Invariant($"{(top.State == BDArmory.Radar.RadarWarningReceiver.EmitterStates.Launch ? "LAUNCH" : "SPIKE")} · {top.vessel.vesselName} · {(clock == 0 ? 12 : clock)} o'clock · ~{rwr.EstimatedRange(top) / 1000f:0} km{(locks > 1 ? " · +" + (locks - 1) : "")}");
+            return FormattableString.Invariant($"{(top.State == BDArmory.Radar.RadarWarningReceiver.EmitterStates.Launch ? "LAUNCH" : "SPIKE")} · {rwr.Symbol(top, top.type)} · {(clock == 0 ? 12 : clock)} o'clock · ~{rwr.EstimatedRange(top) / 1000f:0} km{(locks > 1 ? " · +" + (locks - 1) : "")}");
         }
 
         string ChaffCue(MissileBase seeker, float time, float distance)
