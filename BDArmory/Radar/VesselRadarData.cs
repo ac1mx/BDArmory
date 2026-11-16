@@ -362,7 +362,7 @@ namespace BDArmory.Radar
 
             if (!radarRectInitialized)
             {
-                float width = RadarScreenSize * BDArmorySettings.RADAR_WINDOW_SCALE + BorderSize + ControlsWidth + Gap * 3;
+                float width = RadarScreenSize * BDArmorySettings.RADAR_WINDOW_SCALE + BorderSize + ScopeComposer.LaunchZoneStripWidth + Gap + ControlsWidth + Gap * 3;
                 float height = RadarScreenSize * BDArmorySettings.RADAR_WINDOW_SCALE + BorderSize + HeaderSize;
                 BDArmorySetup.WindowRectRadar = new Rect(BDArmorySetup.WindowRectRadar.x, BDArmorySetup.WindowRectRadar.y, width, height);
                 radarRectInitialized = true;
@@ -1203,6 +1203,7 @@ namespace BDArmory.Radar
 
             if (!vessel.Landed) ScopeComposer.Horizon(canvas, display, rollAngle);
 
+            bugged.valid = false; // Set again by DrawDisplayedContacts while a lock is drawn.
             if (noData)
             {
                 if (iCount > 0) DrawDisplayedIRContacts();
@@ -1217,14 +1218,12 @@ namespace BDArmory.Radar
 
             if (showSelector) ScopeComposer.Cursor(canvas, new ScopePoint(selectorPos.x, selectorPos.y), scale);
 
-            if (LastMissile && LastMissile.TargetAcquired)
-                ScopeComposer.MissileData(canvas, display, LastMissile.GetShortName(), "T-" + LastMissile.TimeToImpact.ToString("0"),
-                    LastMissile.ActiveRadar && Mathf.Round(Time.time * 3) % 2 == 0 ? "ACTIVE" : null, scale);
-
             ScopeComposer.Mode(canvas, display, RadarMode(), slaveTurrets ? "TURRETS" : null, scale);
             if (dispRange) DisplayRange(canvas, display, scale); //don't change dist for non-range capable IRSTs
 
             GUI.EndGroup();
+
+            DrawScopeData();
 
             // Show Control Button group
             DisplayRadarControls();
@@ -1546,7 +1545,7 @@ namespace BDArmory.Radar
         {
             float buttonHeight = 25;
             float line = HeaderSize + BorderSize / 2;
-            float startX = BorderSize + RadarDisplayRect.width;
+            float startX = ControlsX;
 
             //Set up button positions depending on window scale.
             Rect dataLinkRect = new Rect(startX, line, ControlsWidth, buttonHeight);
@@ -2532,6 +2531,42 @@ namespace BDArmory.Radar
             }
         }
 
+        /// <summary>The bugged target as this frame's scope drew it, for the launch zone strip and the data panel.</summary>
+        struct BuggedTarget
+        {
+            public bool valid;
+            public float rangeKm, closure, altitudeKm;
+            public string type;
+            public float? scopeY; // Its symbol's height on a sector scope (the launch zone caret sits level with it).
+        }
+        BuggedTarget bugged;
+
+        /// <summary>
+        /// Beside the scope: the launch zone strip (on the scope's range scale) and, under the buttons, the bugged target's data and the
+        /// selected missile in flight — kept off the scope so nothing covers its contacts.
+        /// </summary>
+        void DrawScopeData()
+        {
+            var canvas = ImguiScopeCanvas.Instance;
+            float scale = BDArmorySettings.RADAR_WINDOW_SCALE;
+            var display = new ScopeRect(RadarDisplayRect.x, RadarDisplayRect.y, RadarDisplayRect.width, RadarDisplayRect.height);
+            var strip = new ScopeRect(display.x + display.w + Gap, display.y, ScopeComposer.LaunchZoneStripWidth, display.h);
+            ScopeComposer.LaunchZoneStrip(canvas, strip);
+            if (bugged.valid && guiDrawDLZData)
+                ScopeComposer.LaunchZone(canvas, strip, display, rIncrements[rangeIndex], guiDLZData.maxLaunchRange, guiDLZData.rangeTr, guiDLZData.minLaunchRange,
+                    guiDistToTarget, bugged.scopeY.HasValue ? display.y + bugged.scopeY.Value : (float?)null, scale);
+
+            float x = ControlsX, top = HeaderSize + BorderSize / 2 + 5 * (25 + Gap) + 6f;
+            var panel = new ScopeRect(x, top, ControlsWidth, display.y + display.h - top);
+            if (bugged.valid) panel = new ScopeRect(x, ScopeComposer.TargetData(canvas, panel, bugged.rangeKm, bugged.closure, bugged.altitudeKm, bugged.type), ControlsWidth, panel.h);
+            if (LastMissile && LastMissile.TargetAcquired)
+                ScopeComposer.MissileData(canvas, panel, LastMissile.GetShortName(), LastMissile.TimeToImpact.ToString("0") + " s",
+                    LastMissile.ActiveRadar && Mathf.Round(Time.time * 3) % 2 == 0 ? "ACTIVE" : null);
+        }
+
+        /// <summary>Left edge of the button column: after the scope and the launch zone strip.</summary>
+        static float ControlsX => BorderSize + RadarDisplayRect.width + Gap + ScopeComposer.LaunchZoneStripWidth + Gap;
+
         const float recognitionTime = 4f;
         Vessel recognising;
         float recognisingSince;
@@ -2598,15 +2633,19 @@ namespace BDArmory.Radar
                         }
                     }
 
-                    // The bugged target's numbers and the launch zone against it.
+                    // The bugged target's numbers and launch zone, drawn beside the scope once it is done (WindowRadar).
                     if (!lockDirty && i == lockedTargetIndexes[activeLockedTargetIndex])
                     {
                         Vector3 toTarget = lockedTarget.position - vessel.CoM;
-                        float closure = Vector3.Dot(vessel.Velocity() - lockedTarget.velocity, toTarget.normalized);
-                        ScopeComposer.LockData(canvas, display, toTarget.magnitude / 1000f, closure, lockedTarget.altitude / 1000f, RecognisedType(t.vessel), scale);
-                        if (guiDrawDLZData)
-                            ScopeComposer.LaunchZone(canvas, display, rIncrements[rangeIndex], guiDLZData.maxLaunchRange, guiDLZData.rangeTr, guiDLZData.minLaunchRange,
-                                guiDistToTarget, omniDisplay ? (float?)null : pingPosition.y, scale);
+                        bugged = new BuggedTarget
+                        {
+                            valid = true,
+                            rangeKm = toTarget.magnitude / 1000f,
+                            closure = Vector3.Dot(vessel.Velocity() - lockedTarget.velocity, toTarget.normalized),
+                            altitudeKm = lockedTarget.altitude / 1000f,
+                            type = RecognisedType(t.vessel),
+                            scopeY = omniDisplay ? (float?)null : pingPosition.y,
+                        };
                     }
                 }
                 else

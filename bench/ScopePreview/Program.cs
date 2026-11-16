@@ -264,23 +264,37 @@ static class RadarScenes
     static ScopeRect Window(SkiaCanvas c, float scale, out float displaySize)
     {
         displaySize = ScopeArtMetrics.RadarScreenSize * scale;
-        float w = displaySize + ScopeArtMetrics.BorderSize + ScopeArtMetrics.ControlsWidth + ScopeArtMetrics.Gap * 3;
+        float w = displaySize + ScopeArtMetrics.BorderSize + ScopeComposer.LaunchZoneStripWidth + ScopeArtMetrics.Gap + ScopeArtMetrics.ControlsWidth + ScopeArtMetrics.Gap * 3;
         float h = displaySize + ScopeArtMetrics.BorderSize + ScopeArtMetrics.HeaderSize;
         c.Window(w, h, "Radar");
         c.BeginGroup(ScopeArtMetrics.BorderSize / 2, ScopeArtMetrics.BorderSize / 2 + ScopeArtMetrics.HeaderSize);
         return new ScopeRect(0, 0, displaySize, displaySize);
     }
 
-    static void Controls(SkiaCanvas c, float displaySize, bool locked, bool slaved, bool omni)
+    public record struct Dlz(float RangeScale, float Max, float NoEscape, float Min, float Target);
+    public record struct Target(float RangeKm, float Closure, float AltitudeKm, string Type);
+    public record struct Missile(string Name, string TimeToImpact, string Seeker);
+
+    /// <summary>What VesselRadarData draws outside the scope: launch zone strip, buttons, data panel (DrawScopeData, DisplayRadarControls).</summary>
+    static void Controls(SkiaCanvas c, float displaySize, float s, bool locked, bool slaved, bool omni, Dlz? dlz = null, Target? target = null, Missile? missile = null)
     {
         c.EndGroup();
-        float x = ScopeArtMetrics.BorderSize + displaySize, y = ScopeArtMetrics.HeaderSize + ScopeArtMetrics.BorderSize / 2, bh = 25;
+        var display = new ScopeRect(ScopeArtMetrics.BorderSize / 2, ScopeArtMetrics.BorderSize / 2 + ScopeArtMetrics.HeaderSize, displaySize, displaySize);
+        var strip = new ScopeRect(display.x + display.w + ScopeArtMetrics.Gap, display.y, ScopeComposer.LaunchZoneStripWidth, display.h);
+        ScopeComposer.LaunchZoneStrip(c, strip);
+        if (dlz is Dlz z) ScopeComposer.LaunchZone(c, strip, display, z.RangeScale, z.Max, z.NoEscape, z.Min, z.Target, null, s);
+        float x = ScopeArtMetrics.BorderSize + displaySize + ScopeArtMetrics.Gap + ScopeComposer.LaunchZoneStripWidth + ScopeArtMetrics.Gap;
+        float y = ScopeArtMetrics.HeaderSize + ScopeArtMetrics.BorderSize / 2, bh = 25;
         string[] labels = { "Data Link", locked ? "Cycle Lock" : omni ? "" : "Boresight", slaved ? "Unslave Turrets" : "Slave Turrets", locked ? "Unlock" : "", locked ? "Unlock All" : "" };
         for (int i = 0; i < labels.Length; ++i)
         {
             if (labels[i].Length > 0) c.Button(new ScopeRect(x, y, ScopeArtMetrics.ControlsWidth, bh), labels[i], on: i == 2 && slaved);
             y += bh + ScopeArtMetrics.Gap;
         }
+        float top = ScopeArtMetrics.HeaderSize + ScopeArtMetrics.BorderSize / 2 + 5 * (25 + ScopeArtMetrics.Gap) + 6f;
+        var panel = new ScopeRect(x, top, ScopeArtMetrics.ControlsWidth, display.y + display.h - top);
+        if (target is Target t) panel = new ScopeRect(x, ScopeComposer.TargetData(c, panel, t.RangeKm, t.Closure, t.AltitudeKm, t.Type), ScopeArtMetrics.ControlsWidth, panel.h);
+        if (missile is Missile m) ScopeComposer.MissileData(c, panel, m.Name, m.TimeToImpact, m.Seeker);
     }
 
     static void Range(SkiaCanvas c, ScopeRect d, float km, float scale)
@@ -308,7 +322,7 @@ static class RadarScenes
         ScopeComposer.InfraredContact(c, d, P(d, 0.66f, 0.33f), false, 0f, 200f, false, 1f, s);
         ScopeComposer.Cursor(c, P(d, 0.52f, 0.39f), s);
         ScopeComposer.Mode(c, d, "SCAN", null, s);
-        Controls(c, size, false, false, false);
+        Controls(c, size, s, false, false, false);
     }
 
     public static void SectorLock(SkiaCanvas c, float s)
@@ -322,11 +336,9 @@ static class RadarScenes
         ScopeComposer.Lock(c, P(d, 0.45f, 0.415f), 195f, true, "7", s);
         ScopeComposer.Lock(c, P(d, 0.68f, 0.56f), 230f, false, "5", s);
         ScopeComposer.Contact(c, ContactKind.Missile, Iff.Hostile, P(d, 0.46f, 0.7f), 0f, 1f, null, s);
-        ScopeComposer.LaunchZone(c, d, 40000f, 32500f, 18000f, 2500f, 23400f, null, s);
         ScopeComposer.Mode(c, d, "LOCK 1/2", "TURRETS", s);
-        ScopeComposer.LockData(c, d, 23.4f, 412f, 7.1f, ScopeComposer.CraftType("Su-35S Red 2", "Red"), s);
-        ScopeComposer.MissileData(c, d, "AIM-120D", "T-14", "ACTIVE", s);
-        Controls(c, size, true, true, false);
+        Controls(c, size, s, true, true, false, new Dlz(40000f, 32500f, 18000f, 2500f, 23400f),
+            new Target(23.4f, 412f, 7.1f, ScopeComposer.CraftType("Su-35S Red 2", "Red")), new Missile("AIM-120D", "14 s", "ACTIVE"));
     }
 
     /// <summary>The launch zone's legend under pressure: ticks close together, the target's caret beside the MAX tick.</summary>
@@ -338,10 +350,8 @@ static class RadarScenes
         ScopeComposer.ScanMarker(c, d, P(d, 0.5f, 1f), null, null, false, s);
         ScopeComposer.Horizon(c, d, 5f);
         ScopeComposer.Lock(c, P(d, 0.55f, 0.1f), 180f, true, "4", s);
-        ScopeComposer.LaunchZone(c, d, 20000f, 19000f, 4000f, 2500f, 18600f, null, s);
         ScopeComposer.Mode(c, d, "LOCK 1/1", null, s);
-        ScopeComposer.LockData(c, d, 18.6f, 655f, 4.2f, null, s);
-        Controls(c, size, true, false, false);
+        Controls(c, size, s, true, false, false, new Dlz(20000f, 19000f, 4000f, 2500f, 18600f), new Target(18.6f, 655f, 4.2f, null));
     }
 
     public static void Omni(SkiaCanvas c, float s)
@@ -359,7 +369,7 @@ static class RadarScenes
         ScopeComposer.InfraredContact(c, d, default, true, 152f, 90f, false, 0.8f, s);
         ScopeComposer.InfraredContact(c, d, default, true, 24f, 0f, true, 1f, s);
         ScopeComposer.Mode(c, d, "SCAN", null, s);
-        Controls(c, size, false, false, true);
+        Controls(c, size, s, false, false, true);
     }
 
     public static void IrstJammed(SkiaCanvas c, float s)
@@ -375,7 +385,7 @@ static class RadarScenes
         ScopeComposer.InfraredContact(c, d, P(d, 0.72f, 0.62f), false, 0f, 120f, false, 0.6f, s);
         ScopeComposer.InfraredContact(c, d, P(d, 0.4f, 0.75f), false, 0f, 0f, true, 1f, s);
         ScopeComposer.Mode(c, d, "IRST SCAN", null, s);
-        Controls(c, size, false, false, false);
+        Controls(c, size, s, false, false, false);
     }
 }
 

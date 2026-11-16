@@ -186,50 +186,52 @@ namespace BDArmory.UI
             if (!string.IsNullOrEmpty(second)) Label(c, new ScopeRect(display.x, display.y + inset + line, display.w, line), second, FontSize(10f, scale), true, ScopePalette.Amber, ScopeAlign.Centre);
         }
 
-        /// <summary>
-        /// The bugged target's range, closure and altitude (top left, under the range scale readout), and its type once the radar has
-        /// recognised it (non-cooperative target recognition; null until then).
-        /// </summary>
-        public static void LockData(IScopeCanvas c, ScopeRect display, float rangeKm, float closure, float altitudeKm, string craftType, float scale)
+        /// <summary>Width of the strip between the scope and the buttons that holds the launch zone scale.</summary>
+        public const float LaunchZoneStripWidth = 64f;
+        /// <summary>Height of a row in the data panel under the buttons.</summary>
+        const float PanelRow = 16f;
+
+        /// <summary>The launch zone strip's glass, beside the scope and as tall as it.</summary>
+        public static void LaunchZoneStrip(IScopeCanvas c, ScopeRect strip)
         {
-            RangeLayout(display, scale, out var minus, out _, out _);
-            float line = 13f * scale;
-            int size = FontSize(10.5f, scale);
-            var rect = new ScopeRect(minus.x + 14f, minus.y + minus.h + 6f, 100f * scale, line); // Clear of the range ticks on the left edge.
-            Label(c, rect, $"RNG {rangeKm:0.0} km", size, true, ScopePalette.LockWhite, ScopeAlign.Left);
-            Label(c, rect.Offset(0f, line), $"VC {closure:0} m/s", size, false, ScopePalette.LockWhite.WithAlpha(0.85f), ScopeAlign.Left);
-            Label(c, rect.Offset(0f, 2f * line), $"ALT {altitudeKm:0.0} km", size, false, ScopePalette.LockWhite.WithAlpha(0.85f), ScopeAlign.Left);
-            if (!string.IsNullOrEmpty(craftType)) Label(c, rect.Offset(0f, 3f * line + 2f), craftType, size, true, ScopePalette.LockWhite, ScopeAlign.Left);
+            var centre = strip.Centre;
+            c.Fill(strip, ScopePalette.BezelBottom, 0f, centre);
+            var glass = new ScopeRect(strip.x + 3f, strip.y + 3f, strip.w - 6f, strip.h - 6f);
+            c.Fill(glass, ScopePalette.GlassEdge, 0f, centre);
+            var rim = ScopePalette.Phosphor.WithAlpha(0.45f);
+            c.Fill(new ScopeRect(glass.x, glass.y, glass.w, 1f), rim, 0f, centre);
+            c.Fill(new ScopeRect(glass.x, glass.y + glass.h - 1f, glass.w, 1f), rim, 0f, centre);
+            c.Fill(new ScopeRect(glass.x, glass.y, 1f, glass.h), rim, 0f, centre);
+            c.Fill(new ScopeRect(glass.x + glass.w - 1f, glass.y, 1f, glass.h), rim, 0f, centre);
         }
 
-        static float DlzWidth(float scale) => 12f * scale;
-
         /// <summary>
-        /// The launch zone of the selected missile against the bugged target, up the right edge (bottom is us, top the range scale):
-        /// maximum range, the no-escape zone as a thick bar down to minimum range, and a caret with the target's range (level with the
-        /// target's symbol when targetY is given, as on a sector display whose range scale needn't be linear); the ticks are labelled.
+        /// The launch zone of the selected missile against the bugged target, in the strip beside the scope and on the scope's range scale
+        /// (bottom is us, top the range scale's end): maximum range, the no-escape zone as a thick bar down to minimum range, each tick
+        /// labelled, and a caret with the target's range (level with the target's symbol when targetY is given, as on a sector display
+        /// whose range scale needn't be linear).
         /// </summary>
-        public static void LaunchZone(IScopeCanvas c, ScopeRect display, float rangeScale, float maxRange, float noEscapeRange, float minRange, float targetRange, float? targetY, float scale)
+        public static void LaunchZone(IScopeCanvas c, ScopeRect strip, ScopeRect display, float rangeScale, float maxRange, float noEscapeRange, float minRange, float targetRange, float? targetY, float scale)
         {
-            float inset = Inset(display.h), w = DlzWidth(scale);
-            float top = display.y + inset + 2f, bottom = display.y + display.h - inset - 2f, x = display.x + display.w - inset - w - 3f;
+            scale = Clamp(scale, 0.85f, 1.2f); // The strip has a fixed width.
+            float inset = Inset(display.h), w = 12f * scale;
+            float top = display.y + inset + 2f, bottom = display.y + display.h - inset - 2f, x = strip.x + 7f;
             float Y(float range) => Clamp(bottom - range / rangeScale * (bottom - top), top, bottom);
             var line = ScopePalette.Phosphor;
-            c.Fill(new ScopeRect(x - 2f, top, w + 4f, bottom - top), new Rgba(0f, 0f, 0f, 0.45f), 0f, display.Centre);
+            var pivot = strip.Centre;
             float yMax = Y(maxRange), yNe = Y(noEscapeRange), yMin = Y(minRange);
-            c.Fill(new ScopeRect(x + w - 1.5f, yMax, 1.5f, bottom - yMax), line.WithAlpha(0.8f), 0f, display.Centre);
-            c.Fill(new ScopeRect(x, yMax - 1f, w, 2f), line, 0f, display.Centre);
-            c.Fill(new ScopeRect(x + w - 5f, yNe, 5f, Math.Max(2f, yMin - yNe)), line.WithAlpha(0.7f), 0f, display.Centre);
-            c.Fill(new ScopeRect(x, yNe - 1f, w * 0.6f, 2f), line.WithAlpha(0.8f), 0f, display.Centre);
-            c.Fill(new ScopeRect(x, yMin - 1f, w, 2f), line, 0f, display.Centre);
-            float yT = targetY.HasValue ? Clamp(targetY.Value, top, bottom) : Y(targetRange), s = 11f * scale;
-            var caret = new ScopePoint(x - s * 0.5f + 1f, yT);
-            Sprite(c, ScopeImage.Caret, caret, s, s, ScopePalette.LockWhite, 90f);
-            Label(c, new ScopeRect(caret.x - s * 0.5f - 42f * scale, yT - 7f * scale, 40f * scale, 14f * scale), $"{targetRange / 1000f:0.0}", FontSize(10f, scale), true, ScopePalette.LockWhite, ScopeAlign.Right);
-
-            // Legend: each tick's name and range beside it, top to bottom, kept clear of each other and of the target's caret (a label
-            // in the caret's way moves below it).
-            float lineH = 11f * scale, caretBand = 8f * scale + lineH * 0.5f;
+            c.Fill(new ScopeRect(x, yMax, 1.5f, bottom - yMax), line.WithAlpha(0.8f), 0f, pivot);
+            c.Fill(new ScopeRect(x, yMax - 1f, w, 2f), line, 0f, pivot);
+            c.Fill(new ScopeRect(x, yNe, 5f, Math.Max(2f, yMin - yNe)), line.WithAlpha(0.7f), 0f, pivot);
+            c.Fill(new ScopeRect(x, yNe - 1f, w * 0.6f, 2f), line.WithAlpha(0.8f), 0f, pivot);
+            c.Fill(new ScopeRect(x, yMin - 1f, w, 2f), line, 0f, pivot);
+            // The target's caret points at the scale from the right, its range beside it.
+            float yT = targetY.HasValue ? Clamp(targetY.Value, top, bottom) : Y(targetRange), s = 10f * scale;
+            var caret = new ScopePoint(x + w + s * 0.5f, yT);
+            Sprite(c, ScopeImage.Caret, caret, s, s, ScopePalette.LockWhite, -90f);
+            Label(c, new ScopeRect(caret.x + s * 0.5f + 1f, yT - 7f, 40f, 14f), $"{targetRange / 1000f:0.0}", FontSize(10f, scale), true, ScopePalette.LockWhite, ScopeAlign.Left);
+            // Tick labels right of the scale, top to bottom, kept clear of each other and of the caret's (one in the caret's way moves below it).
+            float lineH = 11f * scale, caretBand = 7f + lineH * 0.5f;
             float next = top + lineH * 0.5f;
             int legendSize = FontSize(9.5f, scale);
             foreach (var (name, range, y) in new[] { ("MAX", maxRange, yMax), ("NE", noEscapeRange, yNe), ("MIN", minRange, yMin) })
@@ -237,21 +239,52 @@ namespace BDArmory.UI
                 float ly = Math.Max(y, next);
                 if (Math.Abs(ly - yT) < caretBand) ly = yT + caretBand;
                 if (ly > bottom - lineH * 0.5f) break;
-                Label(c, new ScopeRect(x - 3f - 60f * scale, ly - lineH * 0.5f, 60f * scale, lineH), $"{name} {range / 1000f:0.#}", legendSize, false, line.WithAlpha(0.8f), ScopeAlign.Right);
+                Label(c, new ScopeRect(x + w + 3f, ly - lineH * 0.5f, strip.x + strip.w - (x + w + 3f) - 4f, lineH), $"{name} {range / 1000f:0.#}", legendSize, false, line.WithAlpha(0.85f), ScopeAlign.Left);
                 next = ly + lineH;
             }
         }
 
-        /// <summary>The selected missile in flight (bottom left): its name, time to impact and whether its seeker has gone active.</summary>
-        public static void MissileData(IScopeCanvas c, ScopeRect display, string name, string timeToImpact, string seeker, float scale)
+        /// <summary>A block of the data panel under the radar's buttons: a heading and rows of label and value. Returns the y below it.</summary>
+        static float PanelBlock(IScopeCanvas c, ScopeRect panel, string heading, (string label, string value, Rgba color, bool bold)[] rows)
         {
-            float inset = Inset(display.h) + 14f, line = 13f * scale;
-            int size = FontSize(10.5f, scale);
-            float y = display.y + display.h - inset - 3f * line;
-            var rect = new ScopeRect(display.x + inset, y, 120f * scale, line);
-            Label(c, rect, name, size, true, ScopePalette.LockWhite, ScopeAlign.Left);
-            Label(c, rect.Offset(0f, line), timeToImpact, size, false, ScopePalette.LockWhite.WithAlpha(0.85f), ScopeAlign.Left);
-            if (!string.IsNullOrEmpty(seeker)) Label(c, rect.Offset(0f, 2f * line), seeker, size, true, ScopePalette.Amber, ScopeAlign.Left);
+            float h = PanelRow * (rows.Length + 1) + 6f;
+            var pivot = panel.Centre;
+            c.Fill(new ScopeRect(panel.x, panel.y, panel.w, h), ScopePalette.GlassEdge, 0f, pivot);
+            c.Fill(new ScopeRect(panel.x, panel.y, 2f, h), ScopePalette.Phosphor.WithAlpha(0.6f), 0f, pivot);
+            Label(c, new ScopeRect(panel.x + 8f, panel.y + 3f, panel.w - 14f, PanelRow), heading, 10, true, ScopePalette.Phosphor.WithAlpha(0.85f), ScopeAlign.Left);
+            for (int i = 0; i < rows.Length; ++i)
+            {
+                var row = new ScopeRect(panel.x + 8f, panel.y + 3f + PanelRow * (i + 1), panel.w - 14f, PanelRow);
+                if (!string.IsNullOrEmpty(rows[i].label)) Label(c, row, rows[i].label, 11, false, ScopePalette.TextDim, ScopeAlign.Left);
+                Label(c, row, rows[i].value, 12, rows[i].bold, rows[i].color, string.IsNullOrEmpty(rows[i].label) ? ScopeAlign.Left : ScopeAlign.Right);
+            }
+            return panel.y + h + 6f;
+        }
+
+        /// <summary>
+        /// The bugged target in the data panel: range, closure, altitude and, once the radar has recognised it (non-cooperative target
+        /// recognition; null until then), its type. Returns the y below the block.
+        /// </summary>
+        public static float TargetData(IScopeCanvas c, ScopeRect panel, float rangeKm, float closure, float altitudeKm, string craftType)
+        {
+            var white = ScopePalette.LockWhite;
+            return PanelBlock(c, panel, "TARGET", new[]
+            {
+                ("RNG", $"{rangeKm:0.0} km", white, true),
+                ("VC", $"{closure:0} m/s", white, false),
+                ("ALT", $"{altitudeKm:0.0} km", white, false),
+                ("TYPE", string.IsNullOrEmpty(craftType) ? "-" : craftType, white, true),
+            });
+        }
+
+        /// <summary>The selected missile in flight in the data panel: its name, time to impact and whether its seeker has gone active.</summary>
+        public static float MissileData(IScopeCanvas c, ScopeRect panel, string name, string timeToImpact, string seeker)
+        {
+            var white = ScopePalette.LockWhite;
+            var rows = string.IsNullOrEmpty(seeker)
+                ? new[] { ((string)null, name, white, true), ("TTI", timeToImpact, white, false) }
+                : new[] { ((string)null, name, white, true), ("TTI", timeToImpact, white, false), ("SEEKER", seeker, ScopePalette.Amber, true) };
+            return PanelBlock(c, panel, "MISSILE", rows);
         }
 
         public static void NoData(IScopeCanvas c, ScopeRect display, float scale) =>

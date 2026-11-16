@@ -4500,7 +4500,7 @@ namespace BDArmory.UI
                 VesselRadarData.RadarScreenSize * radarScale);
             WindowRectRadar =
               new Rect(WindowRectRadar.x, WindowRectRadar.y,
-                VesselRadarData.RadarDisplayRect.height + VesselRadarData.BorderSize + VesselRadarData.ControlsWidth + VesselRadarData.Gap * 3,
+                VesselRadarData.RadarDisplayRect.height + VesselRadarData.BorderSize + ScopeComposer.LaunchZoneStripWidth + VesselRadarData.Gap + VesselRadarData.ControlsWidth + VesselRadarData.Gap * 3,
                 VesselRadarData.RadarDisplayRect.height + VesselRadarData.BorderSize + VesselRadarData.HeaderSize);
         }
 
