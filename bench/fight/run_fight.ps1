@@ -21,6 +21,10 @@ param(
     [string]$SmartCraft = "", # Missiles launched by craft whose name contains this word fly as smart seekers, all others as stock ones.
     [string]$AdvancedCraft = "", # Only missiles launched by craft whose name contains this word use their homing law, motor mode, midcourse and salvo behaviour.
     [string]$AwarenessCraft = "", # Only pilots of craft whose name contains this word use the warning-receiver picture, no-escape shot, lofted launch, double notch, drag and masking.
+    [string]$GunneryCraft = "", # Only pilots of craft whose name contains this word use the gun employment range, flight-path lift measure, clean drag fit and planner speed floor.
+    [string]$AltitudeCraft = "", # Only pilots of craft whose name contains this word climb for height over the target before missile shots.
+    [switch]$Sample, # BDAPerf's sampling profiler with load/spawn stacks.
+    [int]$UiCapture = 0, # Seconds between screenshots of the interface (GameData/BDArmory/Logs/ui_*.png, moved to the run folder); 0: none.
     [int]$StopAfterShots = 0, # Stop once this many shot results are logged (per word in -ArmWords, when given) instead of flying out -Duration.
     [string]$ArmWords = "",     # Craft-name words that tell the arms of a comparison apart, comma-separated (e.g. "Red,Blue").
     [string]$Expect = "",       # Log patterns, separated by ";", that must each have a match once the first ten shots are in; the run is stopped if one hasn't.
@@ -44,6 +48,7 @@ $t = $t -replace '(?m)^(\s*benchmark\s*=\s*)\w+', '${1}true'
 $t = $t -replace '(?m)^(\s*spawnFolder\s*=\s*)\S+', "`${1}$Folder"
 $t = $t -replace '(?m)^(\s*minLoadedVessels\s*=\s*)\d+', "`${1}$MinVessels"
 $t = $t -replace '(?m)^(\s*durationSeconds\s*=\s*)\d+', "`${1}$Duration"
+if ($Sample) { $t = $t -replace '(?m)^(\s*)sample\s*=\s*\w+', "`${1}sample = true`n`${1}sampleLoad = true" } # Stall stacks (main thread) in the capture report.
 [IO.File]::WriteAllText($perf, $t)
 
 # Spawn apart and already flying over the sea off the space centre; start the competition 10 s after it forms.
@@ -61,12 +66,19 @@ if ($Patrol) { $flags += "$pluginData\test_patrol.on" }
 if ($SmartCraft) { $flags += "$pluginData\test_smart_seekers.on" }
 if ($AdvancedCraft) { $flags += "$pluginData\test_advanced_missiles.on" }
 if ($AwarenessCraft) { $flags += "$pluginData\test_pilot_awareness.on" }
+if ($GunneryCraft) { $flags += "$pluginData\test_gunnery.on" }
+if ($FlightRecorder) { $flags += "$pluginData\flight_recorder.on" }
+if ($UiCapture -gt 0) { $flags += "$pluginData\ui_capture.on" }
+if ($AltitudeCraft) { $flags += "$pluginData\test_altitude.on" }
 $variantPatch = "$Ksp\GameData\Custom\Patches\zzFightVariants.cfg"
 Add-HarnessCleanup ($flags + $variantPatch)
 foreach ($f in $flags) { Set-Content $f "" }
 if ($SmartCraft) { Set-Content "$pluginData\test_smart_seekers.on" $SmartCraft }
 if ($AdvancedCraft) { Set-Content "$pluginData\test_advanced_missiles.on" $AdvancedCraft }
 if ($AwarenessCraft) { Set-Content "$pluginData\test_pilot_awareness.on" $AwarenessCraft }
+if ($GunneryCraft) { Set-Content "$pluginData\test_gunnery.on" $GunneryCraft }
+if ($UiCapture -gt 0) { Set-Content "$pluginData\ui_capture.on" "$UiCapture" }
+if ($AltitudeCraft) { Set-Content "$pluginData\test_altitude.on" $AltitudeCraft }
 if ($PatchFile) { Copy-Item $PatchFile $variantPatch -Force }
 if ($ShotModel) { Copy-Item $ShotModel "$pluginData\shot_model.cfg" -Force } # Backed up (or marked for removal) with the other game files.
 try {
@@ -83,6 +95,17 @@ finally {
         $recordings = Get-ChildItem "$Ksp\GameData\BDArmory\Logs" -Filter "flightdata-*.csv" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $p.StartTime }
         if ($FlightRecorder) { New-Item -ItemType Directory -Force "$out\flightdata" | Out-Null; $recordings | Move-Item -Destination "$out\flightdata\" -Force }
         else { $recordings | Remove-Item -Force }
+        $shots = Get-ChildItem "$Ksp\GameData\BDArmory\Logs" -Filter "ui_*.bmp" -ErrorAction SilentlyContinue
+        if ($shots) {
+            New-Item -ItemType Directory -Force "$out\ui" | Out-Null
+            Add-Type -AssemblyName System.Drawing
+            foreach ($s in $shots) {
+                $img = [System.Drawing.Image]::FromFile($s.FullName)
+                $img.Save("$out\ui\$($s.BaseName).png", [System.Drawing.Imaging.ImageFormat]::Png); $img.Dispose()
+                Remove-Item $s.FullName -Force
+            }
+        }
+        Get-ChildItem "$Ksp\GameData\BDAPerf\PluginData" -Filter "*_run_*" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $p.StartTime } | Copy-Item -Destination $out -Force
         Copy-Item "$Ksp\KSP.log" "$out\KSP.log" -Force
         "restored; log copied to $out\KSP.log"
     } else { "KSP still running: NOT restored" }

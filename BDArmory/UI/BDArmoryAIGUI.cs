@@ -403,6 +403,18 @@ namespace BDArmory.UI
         /// Note: only UI_FloatRange derived entries should be included here.
         /// </summary>
         /// <param name="aiType">The type of the currently active AI.</param>
+        /// <summary>
+        /// One input field component per field name, reused for every AI shown. Adding a fresh set on each vessel switch left the old
+        /// ones on the window's object (about 90 per switch), each switch slower than the last: whole-second stalls in long fights.
+        /// </summary>
+        NumericInputField PooledInputField(string key)
+        {
+            if (!inputFieldPool.TryGetValue(key, out var field) || field == null) inputFieldPool[key] = field = gameObject.AddComponent<NumericInputField>();
+            field.possibleValue = string.Empty; // Show the new AI's value, not the last one typed.
+            return field;
+        }
+        readonly Dictionary<string, NumericInputField> inputFieldPool = new Dictionary<string, NumericInputField>();
+
         void SetInputFields(AIType aiType)
         {
             // Note: We use nameof(AI.field) to get the fieldname to avoid typos.
@@ -518,7 +530,7 @@ namespace BDArmory.UI
                         }.ToDictionary(key => key, key =>
                         {
                             var (value, minValue, maxValue, meta) = GetAIFieldLimits(aiType, ActiveAI, key);
-                            return gameObject.AddComponent<NumericInputField>().Initialise(0, value, minValue, maxValue, meta);
+                            return PooledInputField(key).Initialise(0, value, minValue, maxValue, meta);
                         });
                         showSection[Section.UpToEleven] = AI.UpToEleven;
                     }
@@ -549,7 +561,7 @@ namespace BDArmory.UI
                         }.ToDictionary(key => key, key =>
                         {
                             var (value, minValue, maxValue, meta) = GetAIFieldLimits(aiType, ActiveAI, key);
-                            return gameObject.AddComponent<NumericInputField>().Initialise(0, value, minValue, maxValue, meta);
+                            return PooledInputField(key).Initialise(0, value, minValue, maxValue, meta);
                         });
                         showSection[Section.UpToEleven] = AI.UpToEleven;
                     }
@@ -582,7 +594,7 @@ namespace BDArmory.UI
                         }.ToDictionary(key => key, key =>
                         {
                             var (value, minValue, maxValue, meta) = GetAIFieldLimits(aiType, ActiveAI, key);
-                            return gameObject.AddComponent<NumericInputField>().Initialise(0, value, minValue, maxValue, meta);
+                            return PooledInputField(key).Initialise(0, value, minValue, maxValue, meta);
                         });
                         showSection[Section.UpToEleven] = AI.UpToEleven;
                     }
@@ -618,7 +630,7 @@ namespace BDArmory.UI
                         }.ToDictionary(key => key, key =>
                         {
                             var (value, minValue, maxValue, meta) = GetAIFieldLimits(aiType, ActiveAI, key);
-                            return gameObject.AddComponent<NumericInputField>().Initialise(0, value, minValue, maxValue, meta);
+                            return PooledInputField(key).Initialise(0, value, minValue, maxValue, meta);
                         });
                     }
                     break;

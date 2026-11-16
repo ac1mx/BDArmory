@@ -437,7 +437,7 @@ namespace BDArmory.GameModes
                         //part.RemoveModule(anim);
                         subsysCrit = true;
                     }
-                    if (part.GetComponent<ModuleDecouple>() != null)
+                    if (part.GetComponent<ModuleDecouple>() != null && !CleanDamage.Active) // Without debris, decouplers hold.
                     {
                         ModuleDecouple stage;
                         stage = part.GetComponent<ModuleDecouple>(); //decouplers decouple
@@ -597,6 +597,7 @@ namespace BDArmory.GameModes
                                 BDACompetitionMode.Instance.competitionStatus.Add($"Cockpit snipe on {part.vessel.GetName()}! {crewMember.name} killed!");
                                 BDACompetitionMode.Instance.OnVesselModified(part.vessel);
                             }
+                            CleanDamage.CrewLost(part.vessel);
                         }
                     }
                 }

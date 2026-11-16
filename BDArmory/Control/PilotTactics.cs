@@ -38,7 +38,7 @@ namespace BDArmory.Control
             var weaponManager = WeaponManager;
             if (!TacticsAllowed(weaponManager) || !canExtend || v == null || v.LandedOrSplashed || Time.time - lastEnergyExtendTime < 30f) return false;
             if (weaponManager.underFire || weaponManager.missileIsIncoming) return false;
-            if (distance < weaponManager.gunRange || distance > 3000f) return false;
+            if (distance < GunEmploymentRange(weaponManager) || distance > 3000f) return false;
             if (EnergyAdvantage(v) > -1500f) return false;
             lastEnergyExtendTime = Time.time;
             ++energyExtendCount;
@@ -108,7 +108,7 @@ namespace BDArmory.Control
         /// </summary>
         string CrankOrPump(MissileFire weaponManager, Vessel v, Vector3 vectorToTarget, float distanceToTarget, ref Vector3 target)
         {
-            if (distanceToTarget < Mathf.Max(2f * weaponManager.gunRange, 4000f)) return null; // Too close for this to matter; fight normally.
+            if (distanceToTarget < Mathf.Max(2f * GunEmploymentRange(weaponManager), 4000f)) return null; // Too close for this to matter; fight normally.
             var (missilesAway, needingRadar) = weaponManager.GetMissilesAway(weaponManager.currentTarget);
             if (missilesAway <= 0 && !weaponManager.missileIsIncoming) return null;
             bool targetHot = Vector3.Dot(v.srf_vel_direction, -vectorToTarget) > 0.5f * distanceToTarget;
@@ -139,7 +139,7 @@ namespace BDArmory.Control
         /// </summary>
         bool OffsetApproach(MissileFire weaponManager, Vessel v, Vector3 vectorToTarget, float distanceToTarget, ref Vector3 target)
         {
-            if (distanceToTarget > 8000f || distanceToTarget < Mathf.Max(1.5f * weaponManager.gunRange, 4f * turnRadius)) return false;
+            if (distanceToTarget > 8000f || distanceToTarget < Mathf.Max(1.5f * GunEmploymentRange(weaponManager), 4f * turnRadius)) return false;
             if (Vector3.Dot(v.srf_vel_direction, -vectorToTarget) < 0.7f * distanceToTarget) return false; // It isn't coming at us.
             if (Vector3.Dot(vessel.srf_vel_direction, vectorToTarget) < 0.7f * distanceToTarget) return false; // We aren't going at it.
             float angle = Mathf.Min(Mathf.Asin(Mathf.Clamp01(2f * turnRadius / distanceToTarget)) * Mathf.Rad2Deg, 30f, offAspectLimit);
@@ -203,6 +203,95 @@ namespace BDArmory.Control
             { ++energyClimbTicks; NoteTactic("Climb before shot"); }
             return true;
         }
+
+        // Comparison in one fight: GameData/BDArmory/PluginData/test_altitude.on holds a word; only pilots of craft whose name contains it
+        // climb for height over the target before a missile shot (AltitudeBeforeShot).
+        static readonly string altitudeTestCraft = ReadTestWord("test_altitude.on");
+        bool NewAltitude => string.IsNullOrEmpty(altitudeTestCraft) || (vessel != null && vessel.vesselName.Contains(altitudeTestCraft));
+        const float heightOverTargetMin = 1500f, heightOverTargetMax = 5000f, climbSlope = 0.27f; // m, m, tan(15°)
+        int altitudeClimbTicks, speedBuildTicks;
+        readonly int[] heightGateTicks = new int[6]; // Ticks HoldHeight stood aside: missile incoming, too close, their shot pressing, high enough, launch window, (unused).
+        string HeightMetrics() => $"turnLimited={turnLimitedTicks * Time.fixedDeltaTime:F1}s speedBuild={speedBuildTicks * Time.fixedDeltaTime:F1}s heightGates={heightGateTicks[0] * Time.fixedDeltaTime:F0}/{heightGateTicks[1] * Time.fixedDeltaTime:F0}/{heightGateTicks[2] * Time.fixedDeltaTime:F0}/{heightGateTicks[3] * Time.fixedDeltaTime:F0}/{heightGateTicks[4] * Time.fixedDeltaTime:F0}";
+
+        /// <summary>
+        /// Hold the high ground through the long-range fight: beyond close range, whenever no missile is coming at us and the bandit's
+        /// shot isn't pressing, the flight path climbs (at full power) towards well above the bandit — at least the craft's default
+        /// altitude. Every launch from higher up flies through thinner air and reaches further (AIM-120D no-escape reach 14 km from
+        /// 3 km up, 19 from 9, 27 from 14), the bandit's shots at us climb into it and lose reach, and the height is energy in hand at
+        /// the merge. Missile defence, cranks and drags still come first (they dive when they need to); this brings the craft back up
+        /// in between. Slower than its corner speed, the craft first runs level at full power to win the speed back (speed is what a
+        /// missile defence and the climb both spend). Bounded by maxAltitude and, with a missile selected, by the share of its
+        /// boresight a launch needs.
+        /// </summary>
+        bool HoldHeight(Vessel v, float distanceToTarget, ref Vector3 target)
+        {
+            var weaponManager = WeaponManager;
+            if (!TacticsAllowed(weaponManager) || v.LandedOrSplashed) return false;
+            if (weaponManager.missileIsIncoming) { ++heightGateTicks[0]; return false; }
+            if (distanceToTarget < Mathf.Max(8000f, 3f * GunEmploymentRange(weaponManager))) { ++heightGateTicks[1]; return false; }
+            bool havePicture = PlanActive(weaponManager) && PictureOf(v);
+            if (havePicture && (picture.theirShot >= loftPressure || picture.theirInescapable)) { ++heightGateTicks[2]; return false; } // Its shot first: defend, don't climb.
+            Vector3 level = (target - vesselTransform.position).ProjectOnPlanePreNormalized(upDirection);
+            float speedFloor = Mathf.Max(cornerSpeed, 1.6f * minSpeed);
+            if (vessel.srfSpeed < speedFloor && vessel.radarAltitude > Mathf.Max(minAltitude, 500f))
+            {
+                // Level at full power: the fastest way back to fighting speed short of diving away the height (a path already going down stays).
+                if (Vector3.Dot(target - vesselTransform.position, upDirection) > 0f) target = vesselTransform.position + level;
+                AdjustThrottle(maxSpeed, false, true);
+                { ++speedBuildTicks; NoteTactic("Build speed"); }
+                return true;
+            }
+            float wanted = Mathf.Max(defaultAltitude, (float)v.altitude + Mathf.Clamp(0.12f * distanceToTarget, heightOverTargetMin, heightOverTargetMax));
+            if (maxAltitudeEnabled) wanted = Mathf.Min(wanted, maxAltitude - 300f);
+            float climb = wanted - (float)vessel.altitude;
+            if (climb < 200f) { ++heightGateTicks[3]; return false; }
+            // Shallower as the speed margin shrinks: level at the corner speed, full slope at 1.3 times it.
+            float slope = climbSlope * Mathf.Clamp01(((float)vessel.srfSpeed - speedFloor) / (0.3f * speedFloor));
+            var missile = weaponManager.CurrentMissile;
+            if (missile != null) slope = Mathf.Min(slope, Mathf.Tan(Mathf.Clamp(0.25f * missile.maxOffBoresight, 2f, 15f) * Mathf.Deg2Rad)); // Keep the target in the launch window.
+            if (slope < 0.03f) { ++heightGateTicks[4]; return false; }
+            target = vesselTransform.position + level + Mathf.Min(climb, slope * level.magnitude) * upDirection;
+            AdjustThrottle(maxSpeed, false, true);
+            { ++altitudeClimbTicks; NoteTactic("Climb for height"); }
+            return true;
+        }
+
+        float turnLimitDeg = -1f, smoothedPathForce; // Turn limit (angle of the fly-to direction off the flight path) and the smoothed thrust-minus-drag along the path.
+        int turnLimitedTicks;
+
+        /// <summary>
+        /// Turn without throwing the speed away while the fight is still at long range: below corner speed, with no missile coming
+        /// and the bandit beyond gun range, the fly-to direction is kept within an angle of the flight path that the engines can hold —
+        /// the angle shrinks while thrust minus drag along the path is negative (the turn is bleeding speed) and grows back while it is
+        /// positive. Hard turns at the craft's full angle of attack (65° on a Su-35) stay for the merge, guns and missile defence.
+        /// </summary>
+        Vector3 LimitTurnForEnergy(Vector3 targetDirection)
+        {
+            var weaponManager = WeaponManager;
+            bool longRange = targetVessel == null || (targetVessel.CoM - vessel.CoM).sqrMagnitude > Sqr(Mathf.Max(8000f, 3f * GunEmploymentRange(weaponManager)));
+            bool calm = currentStatusMode == StatusMode.Engaging || currentStatusMode == StatusMode.Free || currentStatusMode == StatusMode.Orbiting || currentStatusMode == StatusMode.Custom;
+            if (!NewAltitude || !TacticsAllowed(weaponManager) || weaponManager.missileIsIncoming || IsEvading || !calm || !longRange || (steerMode == SteerModes.Aiming && weaponManager.CurrentMissile == null))
+                return ReleaseTurnLimit(targetDirection);
+            Vector3 velocityDirection = vessel.Velocity().normalized;
+            Vector3 specificForce = (Vector3)vessel.acceleration - (Vector3)FlightGlobals.getGeeForceAtPosition(vessel.CoM);
+            smoothedPathForce = Mathf.Lerp(smoothedPathForce, Vector3.Dot(specificForce, velocityDirection), Time.fixedDeltaTime / 0.5f);
+            float maxDeg = Mathf.Min(EffectiveMaxAoA, 90f), minDeg = 6f;
+            if (turnLimitDeg < 0f) turnLimitDeg = maxDeg;
+            if (vessel.srfSpeed < cornerSpeed) turnLimitDeg += 3f * (smoothedPathForce - 1f) * Time.fixedDeltaTime; // Settle on a turn that still gains a little speed.
+            else turnLimitDeg += 30f * Time.fixedDeltaTime;
+            turnLimitDeg = Mathf.Clamp(turnLimitDeg, minDeg, maxDeg);
+            if (turnLimitDeg >= maxDeg || VectorUtils.Angle(velocityDirection, targetDirection) <= turnLimitDeg) return targetDirection;
+            ++turnLimitedTicks;
+            return Vector3.RotateTowards(velocityDirection, targetDirection, turnLimitDeg * Mathf.Deg2Rad, 0f);
+        }
+
+        Vector3 ReleaseTurnLimit(Vector3 targetDirection)
+        {
+            turnLimitDeg = -1f;
+            return targetDirection;
+        }
+
+        static float Sqr(float x) => x * x;
 
         const float loftMinRange = 8000f, loftMinGain = 0.04f, loftPressure = 0.35f;
         int launchLoftTicks, dragTicks, maskTicks;
@@ -296,7 +385,7 @@ namespace BDArmory.Control
                 NoteTactic("Offensive: lag pursuit");
                 return -Mathf.Min(lagFraction * distanceToTarget, maxLagDistance) * v.srf_vel_direction;
             }
-            if (distanceToTarget > 1.2f * weaponManager.gunRange)
+            if (distanceToTarget > 1.2f * GunEmploymentRange(weaponManager))
             {
                 ++leadPursuitTicks;
                 NoteTactic("Offensive: lead pursuit");
@@ -653,7 +742,7 @@ namespace BDArmory.Control
             // Heat: an opponent behind us, beyond gun range and pointing at us can launch at our exhaust. Keep the afterburner off (see AdjustThrottle)
             // and put flares out before the launch rather than after it.
             rearAspectHeatThreat = false;
-            if (distance < 5000f && distance > Mathf.Clamp(weaponManager.gunRange, 600f, 2000f))
+            if (distance < 5000f && distance > Mathf.Clamp(GunEmploymentRange(weaponManager), 600f, 2000f))
             {
                 Vector3 toThreat = (threat.CoM - vessel.CoM) / distance;
                 rearAspectHeatThreat = Vector3.Dot(toThreat, vesselTransform.up) < 0 && Vector3.Dot(threat.ReferenceTransform.up, -toThreat) > 0.866f;
@@ -682,7 +771,7 @@ namespace BDArmory.Control
             // switchable by the AI (Dynamic Radar) are touched.
             bool otherTrack = (weaponManager._irstsEnabled && weaponManager.irsts.Count > 0)
                 || (weaponManager.vesselRadarData != null && weaponManager.vesselRadarData.MaxRadarLocksExternal > 0);
-            bool wantSilent = distance < float.MaxValue && distance > Mathf.Max(2f * weaponManager.gunRange, 4000f)
+            bool wantSilent = distance < float.MaxValue && distance > Mathf.Max(2f * GunEmploymentRange(weaponManager), 4000f)
                 && otherTrack
                 && !weaponManager.missileIsIncoming
                 && (weaponManager.CurrentMissile == null || weaponManager.CurrentMissile.TargetingMode != MissileBase.TargetingModes.Radar)

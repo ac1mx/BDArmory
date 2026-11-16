@@ -63,7 +63,7 @@ namespace BDArmory.Control
         bool SpikeCrank(MissileFire weaponManager, Vessel v, Vector3 vectorToTarget, float distanceToTarget, float threshold, ref Vector3 target)
         {
             if (!NewAwareness || !LockedBy(weaponManager, v) || weaponManager.missileIsIncoming) return false;
-            if (distanceToTarget < Mathf.Max(4000f, 2f * weaponManager.gunRange)) return false;
+            if (distanceToTarget < Mathf.Max(4000f, 2f * GunEmploymentRange(weaponManager))) return false;
             if (picture.ourMissilesInFlight > 0 || picture.ourShot >= 0.8f * threshold) return false; // Cranking with missiles away, or about to shoot, is handled elsewhere.
             if (picture.theirShot < spikeShotFloor && picture.theirShotLater < spikeShotFloor) return false; // It can't hurt us from there.
             if (PlanAgainst(v) == FightPlan.Compress) return false; // Out-reached: closing is the plan.

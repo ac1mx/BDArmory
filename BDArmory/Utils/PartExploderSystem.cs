@@ -17,12 +17,16 @@ namespace BDArmory.Utils
         {
             if (!HighLogic.LoadedSceneIsFlight) return;
             if (p == null) return;
+            if (GameModes.CleanDamage.TryWreck(p, "destroyed")) return;
             ExplodingParts.Add(p);
         }
+
+        void Awake() => GameModes.CleanDamage.Reset();
 
         private void OnDestroy()
         {
             ExplodingParts.Clear();
+            GameModes.CleanDamage.Reset();
         }
 
         public void Update()

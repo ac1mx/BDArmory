@@ -297,6 +297,10 @@ namespace BDArmory.Settings
         [BDAPersistentSettingsField] public static bool BD_PART_STRENGTH = false;        // Part strength - breakingForce/Torque - decreases as part takes damage
         [BDAPersistentSettingsField] public static float BD_PROP_DAM_RATE = 1;          // Rate multiplier, 0.1-2
         [BDAPersistentSettingsField] public static bool BD_INTAKES = true;              // Can intakes be damaged?
+        [BDAPersistentSettingsField] public static bool BD_NO_DEBRIS = false;           // Destroyed parts are wrecked in place (no debris); crippled craft are shot down and removed whole (GameModes/CleanDamage).
+        [BDAPersistentSettingsField] public static float BD_NO_DEBRIS_LIFT_LOSS = 0.5f; // Share of its lift a craft can lose before it is shot down.
+        [BDAPersistentSettingsField] public static float BD_NO_DEBRIS_MASS_LOSS = 0.4f; // Share of its mass in wrecked parts before it is shot down.
+        [BDAPersistentSettingsField] public static float BD_NO_DEBRIS_REMOVE_DELAY = 3f; // s a shot-down craft falls before it is removed.
         [BDAPersistentSettingsField] public static bool BD_GIMBALS = true;              // Can gimbals be disabled?
         [BDAPersistentSettingsField] public static bool BD_AEROPARTS = true;            // Lift loss & added drag
         [BDAPersistentSettingsField] public static float BD_LIFT_LOSS_RATE = 1;         // Rate multiplier

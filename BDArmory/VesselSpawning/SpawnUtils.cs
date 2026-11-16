@@ -591,6 +591,26 @@ namespace BDArmory.VesselSpawning
         {
             if (vessel == null) yield break;
             removeVesselsPending = Math.Max(1, removeVesselsPending + 1);
+            if (vessel == FlightGlobals.ActiveVessel && vessel.vesselType != VesselType.SpaceObject)
+            {
+                // Killing the focussed vessel makes every part die on its own, decoupling each into a new vessel first (seconds of
+                // vessel creation for a fighter). Hand the focus to another loaded craft and recover this one whole instead.
+                // Prefer a craft still in the fight, then any other craft; a missile or debris only as a last resort.
+                Vessel other = null;
+                int otherRank = -1;
+                foreach (var v in FlightGlobals.VesselsLoaded)
+                {
+                    if (v == null || v == vessel || v.packed || v.vesselType == VesselType.SpaceObject) continue;
+                    int rank = v.vesselType == VesselType.Debris || v.IsMissile() ? 0 : VesselModuleRegistry.GetMissileFire(v, true) != null && !GameModes.CleanDamage.IsShotDown(v) ? 2 : 1;
+                    if (rank > otherRank) { other = v; otherRank = rank; }
+                }
+                if (other != null)
+                {
+                    FlightGlobals.ForceSetActiveVessel(other);
+                    yield return waitForFixedUpdate;
+                    if (vessel == null) { --removeVesselsPending; yield break; }
+                }
+            }
             if (vessel != FlightGlobals.ActiveVessel && vessel.vesselType != VesselType.SpaceObject)
             {
                 try

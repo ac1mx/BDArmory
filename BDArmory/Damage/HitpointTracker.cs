@@ -1100,9 +1100,10 @@ namespace BDArmory.Damage
                 return;
             }
 
+            if (GameModes.CleanDamage.IsWrecked(part)) return;
             partdamage = -Mathf.Max(partdamage, 0f);
             Hitpoints += (partdamage / defenseMutator); //why not just go -= partdamage?
-            if (BDArmorySettings.BATTLEDAMAGE && BDArmorySettings.BD_PART_STRENGTH)
+            if (BDArmorySettings.BATTLEDAMAGE && BDArmorySettings.BD_PART_STRENGTH && !GameModes.CleanDamage.Active) // Weakened joints break, making debris.
             {
                 part.breakingForce = maxForce * (Hitpoints / maxHitPoints);
                 part.breakingTorque = maxTorque * (Hitpoints / maxHitPoints);

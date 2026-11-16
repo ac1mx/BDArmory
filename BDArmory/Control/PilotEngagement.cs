@@ -385,7 +385,7 @@ namespace BDArmory.Control
         {
             if (!PlanActive(weaponManager) || !PictureOf(v)) { SetPlanMode(PlanMode.None, null); return null; }
             CountMatchupTicks(v);
-            float bvrRange = Mathf.Max(4000f, 2f * weaponManager.gunRange);
+            float bvrRange = Mathf.Max(4000f, 2f * GunEmploymentRange(weaponManager));
             bool theyCanShoot = picture.theirLong + picture.theirShort > 0;
             float threshold = ShotThresholdFor(picture.ourLong + picture.ourShort);
 

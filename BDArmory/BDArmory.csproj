@@ -160,6 +160,7 @@
     <Compile Include="Control\ShotModel.cs" />
     <Compile Include="Control\MissileFlyout.cs" />
     <Compile Include="Control\PilotBFM.cs" />
+    <Compile Include="Control\PilotGunnery.cs" />
     <Compile Include="Control\PilotMissileDefence.cs" />
     <Compile Include="Control\PilotEngagement.cs" />
     <Compile Include="Control\PilotSection.cs" />
@@ -234,6 +235,7 @@
     <Compile Include="GameModes\BattleDamage\BattleDamageHandler.cs" />
     <Compile Include="GameModes\BattleDamage\BattleDamageTracker.cs" />
     <Compile Include="GameModes\BattleDamage\AirframeIntegrity.cs" />
+    <Compile Include="GameModes\BattleDamage\CleanDamage.cs" />
     <Compile Include="GameModes\ModuleSpaceFriction.cs" />
     <Compile Include="GameModes\Mutators\BDAMutator.cs" />
     <Compile Include="GameModes\Mutators\MutatorInfo.cs" />

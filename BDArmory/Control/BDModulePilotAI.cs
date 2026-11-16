@@ -2252,7 +2252,7 @@ namespace BDArmory.Control
             UpdateGAndAoALimits(s);
             AdjustPitchForGAndAoALimits(s);
             controlCore.Applied(s.pitch, s.yaw, s.roll, Time.fixedDeltaTime);
-            if (steeringMetricsEnabled && !vessel.LandedOrSplashed) RecordFlightData(s);
+            if (flightRecorderEnabled && !vessel.LandedOrSplashed) RecordFlightData(s);
             // Perform the check here since we're now allowing evading/engaging while below mininum altitude.
             if (belowMinAltitude && vessel.radarAltitude > minAltitude && Vector3.Dot(vessel.Velocity(), vessel.upAxis) > 0) // We're good.
             {
@@ -2776,10 +2776,10 @@ namespace BDArmory.Control
                         // so that a shot is there when the range closes; otherwise a turning fight between equal craft rarely offers one.
                         // Slightly wider limits for staying on the target than for going onto it, so that the nose doesn't hunt in and out of the aim.
                         float aimHold = aimingLatched ? 1.25f : 1f;
-                        bool snapshot = advancedTactics && pilotSkill > 25f && !v.LandedOrSplashed && distanceToTarget < 1.5f * aimHold * weaponManager.gunRange && angleToTarget < aimHold * Mathf.Clamp(0.9f * EffectiveMaxAoA, 20f, 45f);
+                        bool snapshot = advancedTactics && pilotSkill > 25f && !v.LandedOrSplashed && distanceToTarget < 1.5f * aimHold * GunEmploymentRange(weaponManager) && angleToTarget < aimHold * Mathf.Clamp(0.9f * EffectiveMaxAoA, 20f, 45f);
                         aimingLatched = snapshot;
-                        if (snapshot && !(distanceToTarget < weaponManager.gunRange && angleToTarget < 20)) { ++snapshotTicks; NoteTactic("Snapshot"); }
-                        if ((distanceToTarget < weaponManager.gunRange && angleToTarget < 20) || snapshot) // FIXME This ought to be changed to a dynamic angle like the firing angle.
+                        if (snapshot && !(distanceToTarget < GunEmploymentRange(weaponManager) && angleToTarget < 20)) { ++snapshotTicks; NoteTactic("Snapshot"); }
+                        if ((distanceToTarget < GunEmploymentRange(weaponManager) && angleToTarget < 20) || snapshot) // FIXME This ought to be changed to a dynamic angle like the firing angle.
                         {
                             steerMode = SteerModes.Aiming; //steer to aim
                             stalemateTimer = 0;
@@ -2802,7 +2802,7 @@ namespace BDArmory.Control
                                     target += Committed && !v.LandedOrSplashed ? PursuitLead(v, lead, vectorToTarget, distanceToTarget, angleToTarget) : lead;
                                 }
                             }
-                            if (advancedTactics && !v.LandedOrSplashed && distanceToTarget < 2f * weaponManager.gunRange && Vector3.Dot(v.srf_vel_direction, vectorToTarget) > 0.3f * distanceToTarget)
+                            if (advancedTactics && !v.LandedOrSplashed && distanceToTarget < 2f * GunEmploymentRange(weaponManager) && Vector3.Dot(v.srf_vel_direction, vectorToTarget) > 0.3f * distanceToTarget)
                             {
                                 // High yo-yo: we're behind the target and closing too fast to stay there. Trade the excess speed for height above
                                 // the target's path instead of overshooting or braking it away.
@@ -2855,7 +2855,7 @@ namespace BDArmory.Control
                         }
                     }
                 }
-                else if (planarDistanceToTarget > weaponManager.gunRange * 1.25f && (vessel.altitude < v.altitude || (float)vessel.radarAltitude < defaultAltitude)) //climb to target vessel's altitude if lower and still too far for guns
+                else if (planarDistanceToTarget > GunEmploymentRange(weaponManager) * 1.25f && (vessel.altitude < v.altitude || (float)vessel.radarAltitude < defaultAltitude)) //climb to target vessel's altitude if lower and still too far for guns
                 {
                     finalMaxSteer = GetSteerLimiterForSpeedAndPower();
                     if (v.LandedOrSplashed) vectorToTarget += upDirection * defaultAltitude; // If the target is landed or splashed, aim for the default altitude while we're outside our gun's range.
@@ -2953,6 +2953,7 @@ namespace BDArmory.Control
                     steerMode = SteerModes.NormalFlight;
                     SetStatus($"Engaging ({tactic})");
                 }
+                if (NewAltitude && (steerMode != SteerModes.Aiming || weaponManager.CurrentMissile != null) && HoldHeight(v, distanceToTarget, ref target) && tactic == null) SetStatus("Engaging (Height)");
                 useVelRollTarget = true;
                 FlyToPosition(s, target);
                 return;
@@ -2971,7 +2972,7 @@ namespace BDArmory.Control
             if (attacker == null || attacker.transform == null || attacker.LandedOrSplashed) return false;
             Vector3 toAttacker = attacker.CoM - vessel.CoM;
             float distance = toAttacker.magnitude;
-            float range = Mathf.Clamp(weaponManager.gunRange, 600f, 2000f);
+            float range = Mathf.Clamp(GunEmploymentRange(weaponManager), 600f, 2000f);
             if (distance > range || distance < 1f) return false;
             Vector3 attackerDirection = toAttacker / distance;
             if (Vector3.Dot(attackerDirection, vesselTransform.up) > -0.5f) return false; // Not in our rear 120°.
@@ -3185,6 +3186,7 @@ namespace BDArmory.Control
             }
             if (allowCorrections && !belowMinAltitude && !isBombing && !vessel.InNearVacuum()) targetDirection = LimitDiveForPullOut(targetDirection);
             if (allowCorrections && !belowMinAltitude && !avoidingTerrain && !vessel.InNearVacuum()) targetDirection = LimitClimbForEnergy(targetDirection);
+            targetDirection = allowCorrections && !belowMinAltitude && !avoidingTerrain && !vessel.InNearVacuum() ? LimitTurnForEnergy(targetDirection) : ReleaseTurnLimit(targetDirection);
             if (steerMode == SteerModes.Aiming && pilotSkill < 100f) targetDirection = SkillAimError(targetDirection);
             Vector3 targetAngVel = Vector3.Cross(prevTargetDir, targetDirection) / Time.fixedDeltaTime;
             Vector3 localTargetAngVel = vesselTransform.InverseTransformVector(targetAngVel);
@@ -3615,6 +3617,14 @@ namespace BDArmory.Control
             controlCore.pitch.actuatorRate = count.x > 0 ? rate.x / count.x : 0;
             controlCore.roll.actuatorRate = count.y > 0 ? rate.y / count.y : 0;
             controlCore.yaw.actuatorRate = count.z > 0 ? rate.z / count.z : 0;
+            // B9 procedural wings leave the part's curves empty (they evaluate to 0 at every Mach number): the game's default lifting
+            // surface curves are what their lift follows then. Without this the factor sat at its 0.05 floor and the best turn speed
+            // came out at the top of the speed range.
+            if (NewGunnery && (machCurve == null || machCurve.Evaluate(0.3f) < 0.05f))
+            {
+                var defaults = PhysicsGlobals.GetLiftingSurfaceCurve("Default");
+                if (defaults != null) { machCurve = defaults.liftMachCurve; if (liftCurve == null || liftCurve.Evaluate(0.3f) <= 0f) liftCurve = defaults.liftCurve; }
+            }
             liftMachFactor = machCurve != null ? Mathf.Max(0.05f, machCurve.Evaluate((float)vessel.mach)) : 1f;
 
             if (controlCoreInputsCounter % 50 == 1) // Once a second: the speed at which the wings give the highest turn rate here.
@@ -3657,6 +3667,8 @@ namespace BDArmory.Control
         #region Steering metrics
         // Aim-tracking statistics for comparing steering laws. Enabled by the presence of GameData/BDArmory/PluginData/steering_metrics.on
         internal static readonly bool steeringMetricsEnabled = System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/steering_metrics.on"));
+        // The per-tick flight recorder (flightdata-*.csv) only with flight_recorder.on as well: its writes cost seconds of stall time in a long fight.
+        static readonly bool flightRecorderEnabled = steeringMetricsEnabled && System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/flight_recorder.on"));
         double aimErrorSqrSum, steerChangeSum;
         int aimSamples, aimOnTargetSamples, steerSamples;
         float lastSteerPitch, lastSteeringMetricsLogTime;
@@ -3812,6 +3824,7 @@ namespace BDArmory.Control
         {
             if (testTeamsEnabled && controlCoreInputsCounter % 50 == 2) UpdateTestTeam();
             if (duelRoundsEnabled) UpdateDuelRound();
+            UpdateGunDiagnostics();
             recordedPitchError = pitchError;
             recordedYawError = yawError;
             steerChangeSum += Mathf.Abs(Mathf.Clamp(steerPitch, -1f, 1f) - lastSteerPitch);
@@ -3827,7 +3840,7 @@ namespace BDArmory.Control
             if (Time.time - lastSteeringMetricsLogTime > 10f)
             {
                 lastSteeringMetricsLogTime = Time.time;
-                Debug.Log($"[BDArmory.BDModulePilotAI]: SteeringMetrics {vessel.vesselName} adaptive={adaptiveControl} aimTime={aimSamples * Time.fixedDeltaTime:F1}s aimRMS={(aimSamples > 0 ? Math.Sqrt(aimErrorSqrSum / aimSamples) : 0):F2}deg onTarget={(aimSamples > 0 ? 100.0 * aimOnTargetSamples / aimSamples : 0):F1}% stickChange={(steerSamples > 0 ? steerChangeSum / steerSamples : 0):F4}/frame confidence={controlCore.pitch.Confidence:F2}/{controlCore.yaw.Confidence:F2}/{controlCore.roll.Confidence:F2} authority={controlCore.pitch.Authority:G3}/{controlCore.yaw.Authority:G3}/{controlCore.roll.Authority:G3} thrustAuthority={constAuthority.x:G3}/{constAuthority.z:G3}/{constAuthority.y:G3} rollLead={controlCore.roll.LeadTime:F2}s vipFlee={vipFleeTicks * Time.fixedDeltaTime:F1}s escort={escortTicks * Time.fixedDeltaTime:F1}s escortRecalls={escortRecallCount} team={(WeaponManager != null && WeaponManager.Team != null ? WeaponManager.Team.Name : "none")} snapshot={snapshotTicks * Time.fixedDeltaTime:F1}s stalemateBreaks={stalemateBreakCount} missileShotsHeld={missileShotsHeldForTerrain} shotsHeldForOdds={missileShotsHeldForOdds} shotsHeldForTiming={missileShotsHeldForTiming} bfm(s)=offensive {offensiveTicks * Time.fixedDeltaTime:F0}/defensive {defensiveTicks * Time.fixedDeltaTime:F0}/neutral {neutralTicks * Time.fixedDeltaTime:F0}/lag {lagPursuitTicks * Time.fixedDeltaTime:F0}/pure {purePursuitTicks * Time.fixedDeltaTime:F0}/lead {leadPursuitTicks * Time.fixedDeltaTime:F0} blindSpot={(WeaponManager != null ? WeaponManager.VisualBlindSpotSamples : 0)} bodyBlocked={(WeaponManager != null ? WeaponManager.VisualBlockedSamples : 0)} missileCoasts={MissileBase.radarCoastCount} seekerHandBacks={MissileBase.seekerHandBackCount} noisyLockTicks={MissileBase.noisyLockTicks} visualRange={(targetVessel != null && WeaponManager != null ? WeaponManager.VisualSample(targetVessel).range : 0):F0}m targetDistance={(targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f):F0}m surfaceRate={controlCore.pitch.actuatorRate:G3}/{controlCore.yaw.actuatorRate:G3}/{controlCore.roll.actuatorRate:G3} q={vessel.dynamicPressurekPa:F1}kPa speed={vessel.srfSpeed:F0} machFactor={liftMachFactor:F2} alt={vessel.radarAltitude:F0} modelCost={(controlCoreTimedFrames > 0 ? controlCoreTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / controlCoreTimedFrames : 0):F2}us/tick tactics(s)=defensive {defensiveBreakTicks * Time.fixedDeltaTime:F1}/highYoYo {highYoYoTicks * Time.fixedDeltaTime:F1}/lowYoYo {lowYoYoTicks * Time.fixedDeltaTime:F1}/crank {crankTicks * Time.fixedDeltaTime:F1}/pump {pumpTicks * Time.fixedDeltaTime:F1}/offset {offsetTicks * Time.fixedDeltaTime:F1}/oneCircle {oneCircleTicks * Time.fixedDeltaTime:F1}/climb {energyClimbTicks * Time.fixedDeltaTime:F1}/zoom {zoomTicks * Time.fixedDeltaTime:F1} diveLimited={diveLimitTicks * Time.fixedDeltaTime:F1}s climbLimited={climbLimitTicks * Time.fixedDeltaTime:F1}s liftCapability={LiftCapability:F1} energyExtends={energyExtendCount} flareSalvos={preemptiveFlareSalvos} radarSilenced={radarSilenceCount} hideHeat={rearAspectHeatThreat} offAspectLimit={offAspectLimit:F0} flaps={flapsDeployed} bestTurnSpeed={bestTurnSpeed:F0} turnRadius={turnRadius:F0} planner={bfmPlanner} bfm={bfmTicks * Time.fixedDeltaTime:F1}s bfmReplans={bfmReplans} bfmAimHandovers={bfmAimHandovers} energyModel={fullThrustAccel:F1}/{dragCoefficients[0]:F3}/{dragCoefficients[1]:F3} rollRate={observedRollRate:F1} flyoutEvasion={missileFlyoutEvasion} evasionFlyouts={flyoutEvaluations} launchBays={(WeaponManager != null ? $"waits {WeaponManager.launchBayWaits}/{WeaponManager.launchBayWaitTime:F1}s preOpen {WeaponManager.launchBayPreOpens} aborts {WeaponManager.launchBayAborts} notReady {WeaponManager.launchBayNotReady} timeouts {WeaponManager.launchBayTimeouts} open {WeaponManager.LaunchBayOpenSeconds:F0}s" : "none")} rcsExposure={BDAStealth.Patches.Exposure(vessel):F2} governor={controlCore.pitchGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.yawGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.rollGovernor.Gain((float)vessel.dynamicPressurekPa):F2} governorLowest={controlCore.pitchGovernor.LowestGain:F2}/{controlCore.yawGovernor.LowestGain:F2}/{controlCore.rollGovernor.LowestGain:F2} reversals={controlCore.pitchGovernor.ReversalRate:F1}/{controlCore.yawGovernor.ReversalRate:F1}/{controlCore.rollGovernor.ReversalRate:F1} flips={controlCore.pitchGovernor.FlipRate:F1}/{controlCore.yawGovernor.FlipRate:F1}/{controlCore.rollGovernor.FlipRate:F1} {PlannerMetrics()} {SalvoMetrics()} {BFMMetrics()} {SectionMetrics()} {MatchupMetrics()} status={currentStatus}");
+                Debug.Log($"[BDArmory.BDModulePilotAI]: SteeringMetrics {vessel.vesselName} adaptive={adaptiveControl} aimTime={aimSamples * Time.fixedDeltaTime:F1}s aimRMS={(aimSamples > 0 ? Math.Sqrt(aimErrorSqrSum / aimSamples) : 0):F2}deg onTarget={(aimSamples > 0 ? 100.0 * aimOnTargetSamples / aimSamples : 0):F1}% stickChange={(steerSamples > 0 ? steerChangeSum / steerSamples : 0):F4}/frame confidence={controlCore.pitch.Confidence:F2}/{controlCore.yaw.Confidence:F2}/{controlCore.roll.Confidence:F2} authority={controlCore.pitch.Authority:G3}/{controlCore.yaw.Authority:G3}/{controlCore.roll.Authority:G3} thrustAuthority={constAuthority.x:G3}/{constAuthority.z:G3}/{constAuthority.y:G3} rollLead={controlCore.roll.LeadTime:F2}s vipFlee={vipFleeTicks * Time.fixedDeltaTime:F1}s escort={escortTicks * Time.fixedDeltaTime:F1}s escortRecalls={escortRecallCount} team={(WeaponManager != null && WeaponManager.Team != null ? WeaponManager.Team.Name : "none")} snapshot={snapshotTicks * Time.fixedDeltaTime:F1}s stalemateBreaks={stalemateBreakCount} missileShotsHeld={missileShotsHeldForTerrain} shotsHeldForOdds={missileShotsHeldForOdds} shotsHeldForTiming={missileShotsHeldForTiming} bfm(s)=offensive {offensiveTicks * Time.fixedDeltaTime:F0}/defensive {defensiveTicks * Time.fixedDeltaTime:F0}/neutral {neutralTicks * Time.fixedDeltaTime:F0}/lag {lagPursuitTicks * Time.fixedDeltaTime:F0}/pure {purePursuitTicks * Time.fixedDeltaTime:F0}/lead {leadPursuitTicks * Time.fixedDeltaTime:F0} blindSpot={(WeaponManager != null ? WeaponManager.VisualBlindSpotSamples : 0)} bodyBlocked={(WeaponManager != null ? WeaponManager.VisualBlockedSamples : 0)} missileCoasts={MissileBase.radarCoastCount} seekerHandBacks={MissileBase.seekerHandBackCount} noisyLockTicks={MissileBase.noisyLockTicks} visualRange={(targetVessel != null && WeaponManager != null ? WeaponManager.VisualSample(targetVessel).range : 0):F0}m targetDistance={(targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f):F0}m surfaceRate={controlCore.pitch.actuatorRate:G3}/{controlCore.yaw.actuatorRate:G3}/{controlCore.roll.actuatorRate:G3} q={vessel.dynamicPressurekPa:F1}kPa speed={vessel.srfSpeed:F0} machFactor={liftMachFactor:F2} alt={vessel.radarAltitude:F0} modelCost={(controlCoreTimedFrames > 0 ? controlCoreTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / controlCoreTimedFrames : 0):F2}us/tick tactics(s)=defensive {defensiveBreakTicks * Time.fixedDeltaTime:F1}/highYoYo {highYoYoTicks * Time.fixedDeltaTime:F1}/lowYoYo {lowYoYoTicks * Time.fixedDeltaTime:F1}/crank {crankTicks * Time.fixedDeltaTime:F1}/pump {pumpTicks * Time.fixedDeltaTime:F1}/offset {offsetTicks * Time.fixedDeltaTime:F1}/oneCircle {oneCircleTicks * Time.fixedDeltaTime:F1}/climb {energyClimbTicks * Time.fixedDeltaTime:F1}/zoom {zoomTicks * Time.fixedDeltaTime:F1} diveLimited={diveLimitTicks * Time.fixedDeltaTime:F1}s climbLimited={climbLimitTicks * Time.fixedDeltaTime:F1}s liftCapability={LiftCapability:F1} energyExtends={energyExtendCount} flareSalvos={preemptiveFlareSalvos} radarSilenced={radarSilenceCount} hideHeat={rearAspectHeatThreat} offAspectLimit={offAspectLimit:F0} flaps={flapsDeployed} bestTurnSpeed={bestTurnSpeed:F0} turnRadius={turnRadius:F0} planner={bfmPlanner} bfm={bfmTicks * Time.fixedDeltaTime:F1}s bfmReplans={bfmReplans} bfmAimHandovers={bfmAimHandovers} energyModel={fullThrustAccel:F1}/{dragCoefficients[0]:F3}/{dragCoefficients[1]:F3} rollRate={observedRollRate:F1} flyoutEvasion={missileFlyoutEvasion} evasionFlyouts={flyoutEvaluations} launchBays={(WeaponManager != null ? $"waits {WeaponManager.launchBayWaits}/{WeaponManager.launchBayWaitTime:F1}s preOpen {WeaponManager.launchBayPreOpens} aborts {WeaponManager.launchBayAborts} notReady {WeaponManager.launchBayNotReady} timeouts {WeaponManager.launchBayTimeouts} open {WeaponManager.LaunchBayOpenSeconds:F0}s" : "none")} rcsExposure={BDAStealth.Patches.Exposure(vessel):F2} governor={controlCore.pitchGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.yawGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.rollGovernor.Gain((float)vessel.dynamicPressurekPa):F2} governorLowest={controlCore.pitchGovernor.LowestGain:F2}/{controlCore.yawGovernor.LowestGain:F2}/{controlCore.rollGovernor.LowestGain:F2} reversals={controlCore.pitchGovernor.ReversalRate:F1}/{controlCore.yawGovernor.ReversalRate:F1}/{controlCore.rollGovernor.ReversalRate:F1} flips={controlCore.pitchGovernor.FlipRate:F1}/{controlCore.yawGovernor.FlipRate:F1}/{controlCore.rollGovernor.FlipRate:F1} {PlannerMetrics()} {SalvoMetrics()} {BFMMetrics()} {SectionMetrics()} {MatchupMetrics()} {GunMetrics()} status={currentStatus}");
             }
         }
         #endregion
@@ -5553,10 +5566,15 @@ namespace BDArmory.Control
             if (!vessel.LandedOrSplashed && Math.Abs(gLoadPred) / liftMachFactor > dynDynPresGRecorded)
                 dynDynPresGRecorded = Math.Abs(gLoadPred) / liftMachFactor;
             // The highest G ever seen is a poor guide to what a pull-out will get (in flight records it was about four times what full
-            // stick delivered on average), so also track what full stick actually delivers, from the rate the nose is coming round.
-            if (Mathf.Abs(lastPitchInput) >= 0.9f && vessel.dynamicPressurekPa > 2)
+            // stick delivered on average), so also track what full stick actually delivers: the flight path's turning acceleration (the
+            // measured specific force across the velocity). Not the rate the nose comes round, which a post-stall or thrust-vectored
+            // nose (a slow Su-35's) turns far faster than the flight path, reading many times the lift there is.
+            if (Mathf.Abs(lastPitchInput) >= 0.9f && vessel.dynamicPressurekPa > 2 && vessel.srfSpeed > 30)
             {
-                float achieved = (float)vessel.srfSpeed * Mathf.Abs(vessel.angularVelocity.x) / ((float)vessel.dynamicPressurekPa * liftMachFactor);
+                Vector3 velocityDirection = vessel.Velocity().normalized;
+                Vector3 specificForce = (Vector3)vessel.acceleration - (Vector3)FlightGlobals.getGeeForceAtPosition(vessel.CoM);
+                float achieved = NewGunnery ? specificForce.ProjectOnPlanePreNormalized(velocityDirection).magnitude / ((float)vessel.dynamicPressurekPa * liftMachFactor)
+                    : (float)vessel.srfSpeed * Mathf.Abs(vessel.angularVelocity.x) / ((float)vessel.dynamicPressurekPa * liftMachFactor);
                 sustainedLiftPerPres = sustainedLiftSamples == 0 ? achieved : Mathf.Lerp(sustainedLiftPerPres, achieved, Time.fixedDeltaTime / 5f);
                 ++sustainedLiftSamples;
             }
@@ -5846,7 +5864,7 @@ namespace BDArmory.Control
         Vector3 LongRangeAltitudeCorrection(Vector3 targetPosition)
         {
             var weaponManager = WeaponManager;
-            var scale = weaponManager != null ? Mathf.Max(2500f, weaponManager.gunRange) : 2500f;
+            var scale = weaponManager != null ? Mathf.Max(2500f, GunEmploymentRange(weaponManager)) : 2500f;
             if (isBombing) scale *= 2; // Double the scale when bombing.
             var scaledDistance = (targetPosition - vessel.transform.position).magnitude / scale;
             if (scaledDistance <= 1) return targetPosition; // No modification if the target is within the gun range.

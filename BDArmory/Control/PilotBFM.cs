@@ -29,6 +29,7 @@ namespace BDArmory.Control
         const float bfmHorizon = 4f, bfmStep = 0.2f, bfmReplanInterval = 0.25f;
         const int bfmSteps = (int)(bfmHorizon / bfmStep);
         const int bfmDirections = 12;
+        const float bfmSlowPenalty = 0.6f;
         static readonly float[] bfmLoads = { 1f, 0.5f, 0.12f };
 
         #region Performance models
@@ -97,7 +98,11 @@ namespace BDArmory.Control
                     fullThrustAccel = fullThrustMeasured ? Mathf.Lerp(fullThrustAccel, thrustAccel, dt / 2f) : thrustAccel;
                     fullThrustMeasured = true;
                 }
-                if (q > 2f) UpdateDragModel(q, normalForce * normalForce / (q + 1f), thrustAccel - alongForce);
+                // Clean flight only: airbrakes, gear and post-stall flight add drag the model has no term for, and were what drove
+                // its drag coefficient to the clamp (planner then sure full power can't hold speed, so it unloads at idle).
+                bool clean = !NewGunnery || !vessel.ActionGroups[KSPActionGroup.Brakes] && !vessel.ActionGroups[KSPActionGroup.Gear]
+                    && Mathf.Abs(Vector3.Dot(along, vesselTransform.forward)) < Mathf.Sin(Mathf.Clamp(stallAoA > 0f ? stallAoA : 20f, 10f, 35f) * Mathf.Deg2Rad);
+                if (q > 2f && clean) UpdateDragModel(q, normalForce * normalForce / (q + 1f), thrustAccel - alongForce);
             }
             bfmLastVelocity = velocity;
             bfmHaveLastVelocity = true;
@@ -129,7 +134,7 @@ namespace BDArmory.Control
             float c00 = (dragCovariance[0, 0] - p0 * p0 / denominator) / energyForgetting, c01 = (dragCovariance[0, 1] - p0 * p1 / denominator) / energyForgetting;
             float c11 = (dragCovariance[1, 1] - p1 * p1 / denominator) / energyForgetting;
             dragCovariance[0, 0] = Mathf.Min(c00, 1f); dragCovariance[0, 1] = dragCovariance[1, 0] = c01; dragCovariance[1, 1] = Mathf.Min(c11, 10f);
-            dragCoefficients[0] = Mathf.Clamp(dragCoefficients[0], 0f, 1f);
+            dragCoefficients[0] = NewGunnery ? Mathf.Clamp(dragCoefficients[0], 0.005f, 0.3f) : Mathf.Clamp(dragCoefficients[0], 0f, 1f); // Six times a typical fighter's at most.
             dragCoefficients[1] = Mathf.Clamp(dragCoefficients[1], 0f, 3f);
         }
 
@@ -329,6 +334,14 @@ namespace BDArmory.Control
                 weights += w;
             }
             float score = total / weights;
+            if (NewGunnery)
+            {
+                // A fighter that runs out of speed has run out of options: below a fighting speed (the craft's corner speed, or most of its
+                // best turn speed) every manoeuvre's end state counts the shortfall against it.
+                float fightSpeed = Mathf.Max(cornerSpeed, 0.6f * bestTurnSpeed, 1.5f * minSpeed);
+                float endSpeed = v.magnitude;
+                if (endSpeed < fightSpeed) score -= bfmSlowPenalty * (fightSpeed - endSpeed) / fightSpeed;
+            }
             if (energyWeight > 0 && opponent != null)
             {
                 float ourEnergy = bfmStartAltitude + Vector3.Dot(p - bfmStartPosition, upDirection) + v.sqrMagnitude / (2f * bodyGravity);
@@ -366,7 +379,7 @@ namespace BDArmory.Control
             }
             else
             {
-                bfmGunRange = weaponManager != null ? Mathf.Clamp(weaponManager.gunRange, 300f, 1200f) : 1000f;
+                bfmGunRange = weaponManager != null ? Mathf.Clamp(GunEmploymentRange(weaponManager), 300f, 1200f) : 1000f;
                 bfmOptimalRange = 0.5f * bfmGunRange; bfmRangeScale = Mathf.Max(bfmGunRange, 800f);
                 bfmGunCos = Mathf.Cos(12f * Mathf.Deg2Rad);
             }
@@ -610,7 +623,12 @@ namespace BDArmory.Control
             var gun = weaponManager.currentGun;
             if (gun == null) return false;
             Vector3 aim = opponent.CoM - gun.GetLeadOffset();
-            return distance < 1.2f * weaponManager.gunRange && VectorUtils.Angle(vesselTransform.up, aim - vessel.CoM) < 20f;
+            float off = VectorUtils.Angle(vesselTransform.up, aim - vessel.CoM);
+            if (!NewGunnery) return distance < 1.2f * GunEmploymentRange(weaponManager) && off < 20f;
+            // Lead pursuit builds the gun shot (flights: ten times the time on target of the planner alone), so it takes over whenever
+            // the nose is within reach of the lead point: the snapshot window inside 1.5 gun ranges, 20° out to 2.5 km.
+            float range = GunEmploymentRange(weaponManager);
+            return (distance < 1.5f * range && off < Mathf.Clamp(0.9f * EffectiveMaxAoA, 20f, 45f)) || (distance < Mathf.Max(2500f, 1.2f * range) && off < 20f);
         }
     }
 }

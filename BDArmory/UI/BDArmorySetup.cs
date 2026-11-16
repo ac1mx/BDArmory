@@ -3700,6 +3700,11 @@ namespace BDArmory.UI
                     BDArmorySettings.BATTLEDAMAGE = false;
                 }
                 BDArmorySettings.INFINITE_ORDINANCE = GUI.Toggle(SRightRect(line), BDArmorySettings.INFINITE_ORDINANCE, StringUtils.Localize("#LOC_BDArmory_Settings_InfiniteMissiles"));
+                if (BDArmorySettings.BATTLEDAMAGE)
+                {
+                    if (BDArmorySettings.BD_NO_DEBRIS != (BDArmorySettings.BD_NO_DEBRIS = GUI.Toggle(SLeftRect(++line), BDArmorySettings.BD_NO_DEBRIS, "Battle Damage Without Debris")) && BDArmorySettings.BD_NO_DEBRIS)
+                        BDArmorySettings.PAINTBALL_MODE = false;
+                }
                 if (BDArmorySettings.PEACE_MODE != (BDArmorySettings.PEACE_MODE = GUI.Toggle(SLeftRect(++line), BDArmorySettings.PEACE_MODE, StringUtils.Localize("#LOC_BDArmory_Settings_PeaceMode"))))//"Peace Mode"
                 {
                     BDATargetManager.ClearDatabase();
