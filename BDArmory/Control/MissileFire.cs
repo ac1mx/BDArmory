@@ -6486,6 +6486,8 @@ namespace BDArmory.Control
         static readonly int sonarAntiradThreatType = RadarWarningReceiver.RWRThreatTypes.Sonar.ToBits();
 
         // extension for feature_engagementenvelope: new smartpickweapon method
+        readonly List<MissileLauncher> radarPickCandidates = new List<MissileLauncher>(); // Usable radar missile types in the last air-target pick.
+
         bool SmartPickWeapon_EngagementEnvelope(TargetInfo target)
         {
             // Part 1: Guard conditions (when not to pick a weapon)
@@ -6761,6 +6763,7 @@ namespace BDArmory.Control
                 // 2. Guns
                 // 3. rockets
                 // 4. unguided missiles
+                radarPickCandidates.Clear();
                 using (List<IBDWeapon>.Enumerator item = weaponTypesAir.GetEnumerator())
                     while (item.MoveNext())
                     {
@@ -7231,6 +7234,8 @@ namespace BDArmory.Control
                                     }
                                     if (distance < ((EngageableWeapon)item.Current).engageRangeMin || firedMissiles >= MissilesOnTargetLimit || (unguidedWeapon && distance > ((EngageableWeapon)item.Current).engageRangeMax / 10))
                                         candidateTDPS *= -1f; // if within min range, negatively weight weapon - allows weapon to still be selected if all others lost/out of ammo
+                                    if (candidateTDPS >= 1f && item.Current is MissileLauncher radarCandidate && radarCandidate.TargetingMode == MissileBase.TargetingModes.Radar)
+                                        radarPickCandidates.Add(radarCandidate); // Usable radar missile type: the pilot may prefer another by its shot chance (below).
                                     if ((!vessel.LandedOrSplashed) || ((distance > gunRange) && (vessel.LandedOrSplashed))) // If we're not airborne, we want to prioritize guns
                                     {
                                         if (distance <= gunRange && candidateTDPS < 1 && targetWeapon != null) continue; //missiles are within min range/can't lock, don't replace existing gun if in gun range
@@ -7254,6 +7259,14 @@ namespace BDArmory.Control
                                 }
                         }
                     }
+                // Several radar missile types usable: the one picked above is the most agile, which keeps a long-range round on the rail
+                // until every shorter-range one is gone. A pilot flying the advanced tactics takes the type whose shot now has the best chance.
+                if (targetWeapon is MissileLauncher pickedRadar && pickedRadar.TargetingMode == MissileBase.TargetingModes.Radar && radarPickCandidates.Count > 1)
+                {
+                    var pilotAI = PilotAI;
+                    var better = pilotAI != null ? pilotAI.BestRadarMissile(pickedRadar, radarPickCandidates, targetVessel) : null;
+                    if (better != null) targetWeapon = better;
+                }
             }
             else if (target.isUnderwater)
             {

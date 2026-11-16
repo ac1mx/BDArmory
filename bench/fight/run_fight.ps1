@@ -24,6 +24,7 @@ param(
     [string]$GunneryCraft = "", # Only pilots of craft whose name contains this word use the gun employment range, flight-path lift measure, clean drag fit and planner speed floor.
     [string]$AltitudeCraft = "", # Only pilots of craft whose name contains this word climb for height over the target before missile shots.
     [switch]$Sample, # BDAPerf's sampling profiler with load/spawn stacks.
+    [string]$PartPhoto = "", # Part names, comma-separated: close-ups of them on the craft every 30 s (ui_part_*.png in the run folder's ui).
     [int]$UiCapture = 0, # Seconds between screenshots of the interface (GameData/BDArmory/Logs/ui_*.png, moved to the run folder); 0: none.
     [int]$StopAfterShots = 0, # Stop once this many shot results are logged (per word in -ArmWords, when given) instead of flying out -Duration.
     [string]$ArmWords = "",     # Craft-name words that tell the arms of a comparison apart, comma-separated (e.g. "Red,Blue").
@@ -69,6 +70,7 @@ if ($AwarenessCraft) { $flags += "$pluginData\test_pilot_awareness.on" }
 if ($GunneryCraft) { $flags += "$pluginData\test_gunnery.on" }
 if ($FlightRecorder) { $flags += "$pluginData\flight_recorder.on" }
 if ($UiCapture -gt 0) { $flags += "$pluginData\ui_capture.on" }
+if ($PartPhoto) { $flags += "$pluginData\part_photo.on" }
 if ($AltitudeCraft) { $flags += "$pluginData\test_altitude.on" }
 $variantPatch = "$Ksp\GameData\Custom\Patches\zzFightVariants.cfg"
 Add-HarnessCleanup ($flags + $variantPatch)
@@ -78,6 +80,7 @@ if ($AdvancedCraft) { Set-Content "$pluginData\test_advanced_missiles.on" $Advan
 if ($AwarenessCraft) { Set-Content "$pluginData\test_pilot_awareness.on" $AwarenessCraft }
 if ($GunneryCraft) { Set-Content "$pluginData\test_gunnery.on" $GunneryCraft }
 if ($UiCapture -gt 0) { Set-Content "$pluginData\ui_capture.on" "$UiCapture" }
+if ($PartPhoto) { Set-Content "$pluginData\part_photo.on" $PartPhoto }
 if ($AltitudeCraft) { Set-Content "$pluginData\test_altitude.on" $AltitudeCraft }
 if ($PatchFile) { Copy-Item $PatchFile $variantPatch -Force }
 if ($ShotModel) { Copy-Item $ShotModel "$pluginData\shot_model.cfg" -Force } # Backed up (or marked for removal) with the other game files.

@@ -65,7 +65,7 @@ namespace BDAStealth
 
             var all = Sensors.All(null);
             var sensors = new List<Sensor>();
-            foreach (string key in new[] { "AESA Radar", "AIM-120D", "EU METEOR", "MBDA Meteor", "APG-63V1", "KAPG-77v1 Radar" })
+            foreach (string key in new[] { "AESA Radar", "AIM-120D", "AIM-260", "AIM-174B", "AIM-424", "EU METEOR", "MBDA Meteor", "APG-63V1", "KAPG-77v1 Radar" })
             {
                 Sensor s = all.FirstOrDefault(x => x.Name.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0);
                 if (s != null && !sensors.Contains(s)) sensors.Add(s);

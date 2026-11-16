@@ -56,7 +56,7 @@ namespace BDArmory.Testing
             Debug.Log($"[BDArmory.UiCapture]: {path} ({vesselName})");
         }
 
-        static void WriteBmp(string path, byte[] rgb, int width, int height)
+        internal static void WriteBmp(string path, byte[] rgb, int width, int height)
         {
             int stride = (width * 3 + 3) & ~3, size = 54 + stride * height;
             using var writer = new BinaryWriter(File.Create(path));
@@ -69,6 +69,112 @@ namespace BDArmory.Testing
                 for (int x = 0; x < width; ++x) { int i = (y * width + x) * 3; row[x * 3] = rgb[i + 2]; row[x * 3 + 1] = rgb[i + 1]; row[x * 3 + 2] = rgb[i]; }
                 writer.Write(row);
             }
+        }
+    }
+
+    /// <summary>
+    /// Test runs only: with GameData/BDArmory/PluginData/part_photo.on present (content: part names, comma-separated), each of those
+    /// parts still carried by a loaded craft is rendered (at most every 30 s per name) from three sides and with its craft, written to
+    /// GameData/BDArmory/Logs/ui_part_*.bmp, so new part models can be looked at after an unattended run.
+    /// </summary>
+    [KSPAddon(KSPAddon.Startup.Flight, false)]
+    public class PartPhoto : MonoBehaviour
+    {
+        static readonly string flag = Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/part_photo.on");
+        string[] names;
+        float next;
+        int count, turn;
+        bool busy;
+
+        void Start()
+        {
+            if (!File.Exists(flag)) { Destroy(this); return; }
+            names = File.ReadAllText(flag).Split(new[] { ',', '\n', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < names.Length; ++i) names[i] = names[i].Trim();
+            next = Time.realtimeSinceStartup + 45f;
+        }
+
+        // Every 2 s look for a listed part still on a craft; photograph each part name at most once per 30 s, round robin.
+        float nextLook;
+        readonly System.Collections.Generic.Dictionary<string, float> lastShot = new System.Collections.Generic.Dictionary<string, float>();
+
+        void Update()
+        {
+            if (busy || names == null || names.Length == 0 || Time.realtimeSinceStartup < next || Time.realtimeSinceStartup < nextLook) return;
+            nextLook = Time.realtimeSinceStartup + 2f;
+            for (int k = 0; k < names.Length; ++k)
+            {
+                string name = names[(turn + k) % names.Length];
+                if (lastShot.TryGetValue(name, out float t) && Time.realtimeSinceStartup - t < 30f) continue;
+                foreach (var vessel in FlightGlobals.Vessels)
+                {
+                    if (vessel == null || !vessel.loaded || vessel.packed) continue;
+                    foreach (var part in vessel.parts)
+                    {
+                        if (part == null || part.partInfo == null || part.partInfo.name != name) continue;
+                        var missile = part.FindModuleImplementing<Weapons.Missiles.MissileBase>();
+                        if (missile != null && missile.HasFired) continue;
+                        lastShot[name] = Time.realtimeSinceStartup;
+                        turn = (turn + k + 1) % names.Length;
+                        StartCoroutine(Photograph(vessel, part));
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Renders the part through a camera of its own (the flight camera is left alone: camera mods override its target), from three
+        /// sides close up and once from further out with the craft carrying it.
+        /// </summary>
+        System.Collections.IEnumerator Photograph(Vessel vessel, Part part)
+        {
+            busy = true;
+            yield return new WaitForEndOfFrame();
+            var main = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : null;
+            if (part == null || vessel == null || main == null) { busy = false; yield break; }
+            const int width = 1600, height = 1000;
+            var go = new GameObject("PartPhotoCamera");
+            var cam = go.AddComponent<Camera>();
+            cam.CopyFrom(main);
+            cam.enabled = false;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = new Color(0.45f, 0.6f, 0.8f);
+            cam.nearClipPlane = 0.05f; cam.farClipPlane = 2000f; cam.fieldOfView = 45f;
+            var rt = new RenderTexture(width, height, 24);
+            cam.targetTexture = rt;
+            var bounds = new Bounds(part.transform.position, Vector3.zero);
+            foreach (var r in part.GetComponentsInChildren<Renderer>()) if (r != null && r.enabled) bounds.Encapsulate(r.bounds);
+            Vector3 center = bounds.center;
+            float size = Mathf.Max(bounds.size.magnitude, 0.5f);
+            var reference = part.FindModelTransform("missileTransform") ?? part.transform;
+            Vector3 f = reference.forward, u = reference.up, r3 = Vector3.Cross(u, f);
+            Vector3 up = (vessel.CoM - vessel.mainBody.position).normalized;
+            float d = 1.05f * size + 0.5f;
+            var views = new[] {
+                ("side", center + (r3 - 0.25f * u + 0.05f * f).normalized * d),
+                ("front", center + (0.6f * f + 0.5f * r3 - 0.6f * u).normalized * d),
+                ("rear", center + (-0.7f * f - 0.4f * r3 - 0.5f * u).normalized * d),
+                ("craft", center + (-0.8f * u + 0.5f * r3 - 0.3f * f).normalized * Mathf.Max(14f, 3f * d)) };
+            foreach (var (view, position) in views)
+            {
+                cam.transform.position = position;
+                cam.transform.LookAt(center, up);
+                cam.Render();
+                var previous = RenderTexture.active;
+                RenderTexture.active = rt;
+                var shot = new Texture2D(width, height, TextureFormat.RGB24, false);
+                shot.ReadPixels(new Rect(0, 0, width, height), 0, 0, false);
+                RenderTexture.active = previous;
+                byte[] rgb = shot.GetRawTextureData();
+                Destroy(shot);
+                string path = Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/Logs", $"ui_part_{++count:000}_{part.partInfo.name}_{view}.bmp");
+                System.Threading.ThreadPool.QueueUserWorkItem(_ => UiCapture.WriteBmp(path, rgb, width, height));
+                Debug.Log($"[BDArmory.PartPhoto]: {path} ({vessel.vesselName}, {part.partInfo.name}, {view})");
+            }
+            cam.targetTexture = null;
+            rt.Release(); Destroy(rt); Destroy(go);
+            busy = false;
         }
     }
 }

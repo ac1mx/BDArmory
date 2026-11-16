@@ -19,3 +19,10 @@ bahaAim120       50   18     26   1100   1350     15
 METEOR           90   40     40   1000   1300     25
 AA13R37Arrow    110   36     45   1200   1500     30
 RVV-AE-PD        90   34     40   1100   1400     25
+#
+# KSPCustom parts (GameData/Custom/Parts; the fitted motor is written into their own part configs, not MissileBalance.cfg).
+# AIM-260 JATM: AMRAAM-sized long-range round between the AIM-120D and the Meteor.
+AIM-260          78   32     50   1300   1600     22
+# AIM-174B Gunslinger and AIM-424 Malice: the US very-long-range class beside the R-37; heavy and slow-turning at the end.
+AIM-174B        105   40     60   1100   1400     35
+AIM-424         120   44     66   1250   1550     35

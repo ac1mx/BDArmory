@@ -482,6 +482,44 @@ namespace BDArmory.Control
             return shotDecision;
         }
 
+        // Radar missile type for the next shot: the weapon manager picks the most agile usable type, which leaves a long-range round
+        // on the rail until every shorter-range one is gone. Another type is taken instead when its shot now has a clearly better
+        // chance (a target outside the medium-range missile's reach). One estimate per type, re-decided at most once a second.
+        const float radarPickMargin = 0.05f, radarPickInterval = 1f;
+        Vessel radarPickTarget;
+        float radarPickTime = -1f;
+        string radarPickName;
+        int radarPickSwitches;
+
+        /// <summary>The radar missile type to use against the target instead of the weapon manager's pick, or null to keep that.</summary>
+        public MissileLauncher BestRadarMissile(MissileLauncher picked, System.Collections.Generic.List<MissileLauncher> candidates, Vessel target)
+        {
+            if (!Committed || picked == null || target == null || target.LandedOrSplashed || picked.part == null) return null;
+            string Name(MissileLauncher m) => m != null && m.part != null && m.part.partInfo != null ? m.part.partInfo.name : null;
+            if (target == radarPickTarget && Time.time - radarPickTime < radarPickInterval)
+            {
+                if (radarPickName == null || radarPickName == Name(picked)) return null;
+                foreach (var c in candidates) if (Name(c) == radarPickName) return c;
+            }
+            radarPickTarget = target; radarPickTime = Time.time; radarPickName = null;
+            string pickedName = Name(picked);
+            int priority = Mathf.RoundToInt(picked.priority);
+            float pickedChance = ShotModel.Estimate(picked, vessel, target), bestChance = pickedChance + radarPickMargin;
+            MissileLauncher best = null;
+            shotTypesSeen.Clear(); shotTypesSeen.Add(pickedName);
+            foreach (var c in candidates)
+            {
+                string name = Name(c);
+                if (name == null || !shotTypesSeen.Add(name) || Mathf.RoundToInt(c.priority) != priority) continue;
+                float chance = ShotModel.Estimate(c, vessel, target);
+                if (chance > bestChance) { bestChance = chance; best = c; }
+            }
+            if (best == null) return null;
+            radarPickName = Name(best);
+            ++radarPickSwitches;
+            return best;
+        }
+
         /// <summary>The latest shot estimate if it was made for this target and missile in the last 2 s, else -1.</summary>
         public float ShotEstimateFor(Vessel target, MissileBase missile) =>
             target != null && target == shotDecisionTarget && missile == shotDecisionMissile && Time.time - shotDecisionTime < 2f ? ShotEstimate : -1f;

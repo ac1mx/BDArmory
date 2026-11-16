@@ -14,7 +14,8 @@ param(
     [string]$RangeOptions = "",
     [int]$RepeatGeometry = 1,       # Fly each launch geometry this many trials in a row (one per missile variant, or repeats of one missile).
     [string]$PatchFile = "",        # ModuleManager patch (missile variants under test) placed in GameData for this run only.
-    [int]$StopAfterShots = 0,       # Stop once this many shot results are logged instead of flying out -Duration.
+    [string]$PartPhoto = "",        # Part names, comma-separated: close-ups of them on the craft every 30 s (ui_part_*.png in the run folder's ui).
+    [int]$StopAfterShots = 0,      # Stop once this many shot results are logged instead of flying out -Duration.
     [string]$Expect = "",           # Log patterns, separated by ";", that must each have a match once the first ten shots are in; the run is stopped if one hasn't.
     [string]$Ksp = "D:\BDArmory KSP Save\KerbalSpaceProgram\English",
     [string]$Dll = "$PSScriptRoot\..\..\BDArmory\bin\Release\BDArmory.dll"
@@ -57,7 +58,9 @@ MISSILE_RANGE
 }
 "@
 $variantPatch = "$Ksp\GameData\Custom\Patches\zzRangeVariants.cfg"
-Add-HarnessCleanup @($rangeCfg, $variantPatch)
+$photoFlag = "$Ksp\GameData\BDArmory\PluginData\part_photo.on"
+Add-HarnessCleanup @($rangeCfg, $variantPatch, $photoFlag)
+if ($PartPhoto) { Set-Content $photoFlag $PartPhoto }
 [IO.File]::WriteAllText($rangeCfg, $cfg)
 if ($PatchFile) { Copy-Item $PatchFile $variantPatch -Force }
 try {
@@ -71,6 +74,16 @@ finally {
         Restore-GameFiles $out
         $atmosphere = "$Ksp\GameData\BDArmory\PluginData\range_atmosphere.txt"
         if (Test-Path $atmosphere) { Move-Item $atmosphere "$out\atmosphere.txt" -Force }
+        $shots = Get-ChildItem "$Ksp\GameData\BDArmory\Logs" -Filter "ui_*.bmp" -ErrorAction SilentlyContinue
+        if ($shots) {
+            New-Item -ItemType Directory -Force "$out\ui" | Out-Null
+            Add-Type -AssemblyName System.Drawing
+            foreach ($s in $shots) {
+                $img = [System.Drawing.Image]::FromFile($s.FullName)
+                $img.Save("$out\ui\$($s.BaseName).png", [System.Drawing.Imaging.ImageFormat]::Png); $img.Dispose()
+                Remove-Item $s.FullName -Force
+            }
+        }
         Copy-Item "$Ksp\KSP.log" "$out\KSP.log" -Force
         "restored; log copied to $out\KSP.log"
     } else { "KSP still running: NOT restored" }
