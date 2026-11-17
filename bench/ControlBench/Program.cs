@@ -208,7 +208,12 @@ static class Program
             if (parts.Length != header.Length) continue;
             var row = new double[parts.Length];
             bool ok = true;
-            for (int j = 0; j < parts.Length && ok; ++j) ok = double.TryParse(parts[j], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out row[j]);
+            for (int j = 0; j < parts.Length && ok; ++j)
+                if (!double.TryParse(parts[j], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out row[j]))
+                {
+                    if (header[j] == "statusText") row[j] = double.NaN; // Text column of newer recordings.
+                    else ok = false;
+                }
             if (ok) rows.Add(row);
         }
         Console.WriteLine($"{System.IO.Path.GetFileName(path)}: {rows.Count} ticks ({rows.Count * 0.02:0}s)");

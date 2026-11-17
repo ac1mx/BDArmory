@@ -53,6 +53,12 @@ namespace BDArmory.Control
             UI_Toggle(scene = UI_Scene.All, disabledText = "#LOC_BDArmory_Disabled", enabledText = "#LOC_BDArmory_Enabled")]
         public bool loopGainGovernor = true;
         readonly PilotControlCore controlCore = new PilotControlCore();
+        // Every pilot flies the reworked steering (fly-to direction slew limit, damping on the two-tick body rate and against the smoothed aim rate).
+        // Comparison in one fight: GameData/BDArmory/PluginData/test_control.on holds a word; only pilots of craft whose name contains it fly it.
+        // test_adaptive.on likewise selects the craft that fly the adaptive model.
+        static readonly string controlTestCraft = ReadTestWord("test_control.on"), adaptiveTestCraft = ReadTestWord("test_adaptive.on");
+        bool NewControl => string.IsNullOrEmpty(controlTestCraft) || (vessel != null && vessel.vesselName.Contains(controlTestCraft));
+        bool AdaptiveActive => adaptiveControl || (adaptiveTestCraft != null && vessel != null && vessel.vesselName.Contains(adaptiveTestCraft));
         /// <summary>How far each axis' identified model is currently trusted (pitch, yaw, roll; 0—1).</summary>
         public Vector3 AdaptiveConfidence => new Vector3(controlCore.pitch.Confidence, controlCore.yaw.Confidence, controlCore.roll.Confidence);
 
@@ -1318,6 +1324,11 @@ namespace BDArmory.Control
         // Within these angles off the nose (°) the roll target fades out: held (aiming) or wings level (otherwise) inside the first, full outside the second.
         const float nearNoseRollHoldAngle = 1.5f, nearNoseRollFadeAngle = 8f;
         const float aimTurnCueSmoothingTime = 0.25f; // s, low-pass on the target's motion across the nose that aiming rolls to match.
+        const float aimDampingSmoothingTime = 0.1f; // s, low-pass on the same motion as the reference of the aiming damping.
+        const float maxAimSlewRate = 120f; // deg/s, fastest the fly-to direction may move.
+        float lastFlyToPositionTime = -1f, lastAngularVelocityTime = -1f;
+        Vector3 lastAngularVelocity, slewedTargetDir;
+        Vector3 dampedLocalTargetAngVel;
         Vector3 smoothedLocalTargetAngVel;
 #if DEBUG
         Vector3 debugSquigglySquidDirection;
@@ -2282,6 +2293,9 @@ namespace BDArmory.Control
             threatRating = evasionThreshold + 1f; // Don't evade by default
             wasEvading = evading;
             evading = false;
+            missileEvadeChosen = false;
+            recordedEvadeBranch = 0;
+            geometryHeldThisTick = false;
             isBombing = false;
             if (extendAbortTimer < 0) // Extending is in cooldown.
             {
@@ -2305,6 +2319,7 @@ namespace BDArmory.Control
                 else
                     kinematicEvasionState = KinematicEvasionStates.None; // Reset missile kinematic evasion state
                 if (evadeMissile && SupportThrough(weaponManager)) evadeMissile = false; // Ours arrives first and kills the launcher its missile still needs.
+                missileEvadeChosen = evadeMissile;
 
                 if (evadeMissile)
                 {
@@ -2953,7 +2968,9 @@ namespace BDArmory.Control
                     steerMode = SteerModes.NormalFlight;
                     SetStatus($"Engaging ({tactic})");
                 }
-                if (NewAltitude && (steerMode != SteerModes.Aiming || weaponManager.CurrentMissile != null) && HoldHeight(v, distanceToTarget, ref target) && tactic == null) SetStatus("Engaging (Height)");
+                bool height = NewAltitude && (steerMode != SteerModes.Aiming || weaponManager.CurrentMissile != null) && HoldHeight(v, distanceToTarget, ref target);
+                if (height && tactic == null) SetStatus("Engaging (Height)");
+                CommitGeometry(v, tactic ?? (height ? "Height" : null), ref target);
                 useVelRollTarget = true;
                 FlyToPosition(s, target);
                 return;
@@ -3126,6 +3143,7 @@ namespace BDArmory.Control
             Vector3 vesselForward = vesselTransform.forward;
             Vector3 vesselUp = vesselTransform.up;
             Vector3 vesselRight = vesselTransform.right;
+            ++recordedFlyCalls;
 
             //test poststall (before FlightPosition is called so we're using the right steerMode)
             float AoA = VectorUtils.Angle(vessel.ReferenceTransform.up, vessel.Velocity());
@@ -3161,6 +3179,12 @@ namespace BDArmory.Control
 
             //ang vel
             Vector3 localAngVel = vessel.angularVelocity;
+            // The measured body rate carries tick-to-tick noise (structure, thrust vectoring), and the damping gain passes it straight to the
+            // stick, which the airframe answers within a tick: a loop that rings at half the physics rate. Averaging the rate over two ticks
+            // cancels that frequency exactly for 10 ms of lag.
+            if (NewControl && Time.fixedTime - lastAngularVelocityTime < 1.5f * Time.fixedDeltaTime) localAngVel = 0.5f * (localAngVel + lastAngularVelocity);
+            lastAngularVelocity = vessel.angularVelocity;
+            lastAngularVelocityTime = Time.fixedTime;
             //test
             Vector3 currTargetDir = targetDirection;
             if (allowCorrections && evasionNonlinearity > 0 && (IsExtending || IsEvading || // If we're extending or evading, add a deviation to the fly-to direction to make us harder to hit.
@@ -3184,14 +3208,25 @@ namespace BDArmory.Control
                 if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Squiggly Squid: {VectorUtils.Angle(targetDirection, Vector3.RotateTowards(targetDirection, squigglySquidDirection, evasionNonlinearity * Mathf.Deg2Rad, 0f)):G3}° at {squigglySquidTime % 360f:G3}°");
                 targetDirection = Vector3.RotateTowards(targetDirection, squigglySquidDirection, evasionNonlinearity * Mathf.Deg2Rad, 0f);
             }
+            // A change of tactic moves the fly-to direction tens of degrees in one tick, often only to move it back a few ticks later.
+            // Followed as it is, that slams the stick over and back. No airframe turns its nose faster than this, so slewing the direction
+            // at this rate costs no response and turns the jump into a sweep. It is slewed before the dive, climb and turn limits, so a
+            // sweep across the sky is still held to them, and terrain avoidance is never delayed.
+            if (NewControl && !avoidingTerrain && !belowMinAltitude && slewedTargetDir.sqrMagnitude > 0.5f && Time.fixedTime - lastFlyToPositionTime < 1.5f * Time.fixedDeltaTime)
+                targetDirection = Vector3.RotateTowards(slewedTargetDir, targetDirection, maxAimSlewRate * Mathf.Deg2Rad * Time.fixedDeltaTime, 0f);
+            slewedTargetDir = targetDirection;
+            lastFlyToPositionTime = Time.fixedTime;
             if (allowCorrections && !belowMinAltitude && !isBombing && !vessel.InNearVacuum()) targetDirection = LimitDiveForPullOut(targetDirection);
             if (allowCorrections && !belowMinAltitude && !avoidingTerrain && !vessel.InNearVacuum()) targetDirection = LimitClimbForEnergy(targetDirection);
             targetDirection = allowCorrections && !belowMinAltitude && !avoidingTerrain && !vessel.InNearVacuum() ? LimitTurnForEnergy(targetDirection) : ReleaseTurnLimit(targetDirection);
             if (steerMode == SteerModes.Aiming && pilotSkill < 100f) targetDirection = SkillAimError(targetDirection);
             Vector3 targetAngVel = Vector3.Cross(prevTargetDir, targetDirection) / Time.fixedDeltaTime;
             Vector3 localTargetAngVel = vesselTransform.InverseTransformVector(targetAngVel);
+            recordedTargetTurn = targetAngVel.magnitude * Mathf.Rad2Deg;
+            recordedTargetPitchRate = -localTargetAngVel.x;
             // A one-frame difference of the aim direction carries every jitter of the lead point; the roll cue uses it smoothed.
             smoothedLocalTargetAngVel = Vector3.Lerp(smoothedLocalTargetAngVel, localTargetAngVel, Time.fixedDeltaTime / (aimTurnCueSmoothingTime + Time.fixedDeltaTime));
+            dampedLocalTargetAngVel = Vector3.Lerp(dampedLocalTargetAngVel, localTargetAngVel, Time.fixedDeltaTime / (aimDampingSmoothingTime + Time.fixedDeltaTime));
             prevTargetDir = targetDirection;
             targetPosition = vesselPos + 100 * targetDirection;
             flyingToPosition = targetPosition;
@@ -3219,7 +3254,9 @@ namespace BDArmory.Control
 
             if (steerMode == SteerModes.Aiming)
             {
-                localAngVel -= localTargetAngVel;
+                // The damping is on the rate relative to the aim direction. Its one-frame turn rate carries every jitter of the lead point,
+                // which the damping gain turns into stick spikes, so it is taken low-passed.
+                localAngVel -= NewControl ? dampedLocalTargetAngVel : localTargetAngVel;
             }
 
             Vector3 localTargetDirection;
@@ -3446,7 +3483,7 @@ namespace BDArmory.Control
             steerYaw *= dynamicAdjustment;
             steerRoll *= dynamicAdjustment;
 
-            if (adaptiveControl && !AutoTune && !vessel.LandedOrSplashed && !belowMinAltitude) // Terrain avoidance stays on the PID.
+            if (AdaptiveActive && !AutoTune && !vessel.LandedOrSplashed && !belowMinAltitude) // Terrain avoidance stays on the PID.
             {
                 // Blend from the PID to the model-normalised controller as each axis' identified model becomes trustworthy.
                 long timingStart = steeringMetricsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -3468,6 +3505,7 @@ namespace BDArmory.Control
 
             bool governed = loopGainGovernor && !AutoTune && !vessel.LandedOrSplashed;
             float governedPres = (float)vessel.dynamicPressurekPa;
+            controlCore.pitchGovernor.countFlips = controlCore.yawGovernor.countFlips = controlCore.rollGovernor.countFlips = !NewControl; // Its damping runs on the two-tick rate.
             if (governed)
             {
                 steerPitch *= controlCore.pitchGovernor.Gain(governedPres);
@@ -3475,10 +3513,13 @@ namespace BDArmory.Control
                 steerRoll *= controlCore.rollGovernor.Gain(governedPres);
             }
 
+            recordedPitchTerms = new Vector4(pitchProportional * dynamicAdjustment, pitchIntegral * dynamicAdjustment, -pitchDamping * dynamicAdjustment, steerPitch);
+            recordedGovernor = governed ? new Vector3(controlCore.pitchGovernor.Gain(governedPres), controlCore.yawGovernor.Gain(governedPres), controlCore.rollGovernor.Gain(governedPres)) : Vector3.one;
             if (steeringMetricsEnabled) UpdateSteeringMetrics(pitchError, yawError, steerPitch);
 
             float appliedPitch = Mathf.Clamp(steerPitch, -finalMaxSteer, finalMaxSteer), appliedYaw = Mathf.Clamp(steerYaw, -finalMaxSteer, finalMaxSteer), appliedRoll = Mathf.Clamp(steerRoll, -userSteerLimit, userSteerLimit);
             SetFlightControlState(s, appliedPitch, appliedYaw, appliedRoll);
+            recordedAppliedPitch = appliedPitch;
             if (governed)
             {
                 controlCore.pitchGovernor.Observe(appliedPitch, governedPres, Time.fixedDeltaTime);
@@ -3680,6 +3721,12 @@ namespace BDArmory.Control
         int flightRecorderLines;
         static int flightRecorderCount;
         float recordedPitchError, recordedYawError, recordedRollError;
+        // Steering internals of the last FlyToPosition call: how often it ran this tick, the aim direction's turn rate, the pitch PID's terms before the governor, the governor's gains and the stick sent before the G and AoA limits.
+        int recordedFlyCalls;
+        float recordedTargetTurn, recordedTargetPitchRate, recordedAppliedPitch;
+        Vector4 recordedPitchTerms;
+        Vector3 recordedGovernor = Vector3.one, recordedVelocityDirection;
+        int recordedEvadeBranch; // Evasive's branch this tick: 0 not evading, 1 missile break, 2 gunfire, 3 holding the break, 4 unknown attacker.
         bool flightRecorderClosed;
         float RecordedThrust()
         {
@@ -3697,7 +3744,7 @@ namespace BDArmory.Control
                 string name = string.Join("_", vessel.vesselName.Split(System.IO.Path.GetInvalidFileNameChars()));
                 flightRecorder = new System.IO.StreamWriter(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/Logs", $"flightdata-{DateTime.Now:HHmmss}-{++flightRecorderCount}-{name}.csv"));
                 // throttle is this frame's input before the speed controller's; appliedThrottle is what the craft flew with last frame, thrust its engines' total (kN).
-                flightRecorder.WriteLine("time,dt,pitchRate,yawRate,rollRate,pitch,yaw,roll,throttle,q,speed,mach,machFactor,sinAoA,sinSideslip,constPitch,constYaw,constRoll,gimbalPitch,gimbalYaw,gimbalRoll,moiPitch,moiYaw,moiRoll,mass,radarAlt,pitchError,yawError,confPitch,confYaw,confRoll,belowMinAlt,status,steerMode,gunSelected,targetDistance,turnRadius,rollError,rollLead,appliedThrottle,thrust");
+                flightRecorder.WriteLine("time,dt,pitchRate,yawRate,rollRate,pitch,yaw,roll,throttle,q,speed,mach,machFactor,sinAoA,sinSideslip,constPitch,constYaw,constRoll,gimbalPitch,gimbalYaw,gimbalRoll,moiPitch,moiYaw,moiRoll,mass,radarAlt,pitchError,yawError,confPitch,confYaw,confRoll,belowMinAlt,status,steerMode,gunSelected,targetDistance,turnRadius,rollError,rollLead,appliedThrottle,thrust,flyCalls,targetTurn,targetPitchRate,pitchP,pitchI,pitchD,pitchRaw,govPitch,govYaw,govRoll,appliedPitch,velocityTurn,evadeChosen,missileTime,closingTime,evadeBranch,geometryHeld,statusText");
             }
             Vector3 w = vessel.angularVelocity, velDir = vessel.Velocity().normalized, moi = vessel.MOI;
             var weaponManager = WeaponManager;
@@ -3711,7 +3758,18 @@ namespace BDArmory.Control
                 controlCore.pitch.Confidence, controlCore.yaw.Confidence, controlCore.roll.Confidence, belowMinAltitude ? 1 : 0, (int)currentStatusMode,
                 (int)steerMode, weaponManager != null && weaponManager.CurrentMissile == null && weaponManager.currentGun != null ? 1 : 0,
                 targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f, turnRadius, recordedRollError, controlCore.roll.LeadTime)
-                + string.Format(System.Globalization.CultureInfo.InvariantCulture, ",{0:G4},{1:G5}", vessel.ctrlState.mainThrottle, RecordedThrust()));
+                + string.Format(System.Globalization.CultureInfo.InvariantCulture, ",{0:G4},{1:G5}", vessel.ctrlState.mainThrottle, RecordedThrust())
+                + string.Format(System.Globalization.CultureInfo.InvariantCulture, ",{0},{1:G5},{2:G5},{3:G5},{4:G5},{5:G5},{6:G5},{7:G4},{8:G4},{9:G4},{10:G5},{11:G5}",
+                    recordedFlyCalls, recordedTargetTurn, recordedTargetPitchRate, recordedPitchTerms.x, recordedPitchTerms.y, recordedPitchTerms.z, recordedPitchTerms.w,
+                    recordedGovernor.x, recordedGovernor.y, recordedGovernor.z, recordedAppliedPitch,
+                    recordedVelocityDirection != Vector3.zero ? VectorUtils.Angle(recordedVelocityDirection, velDir) / Time.fixedDeltaTime : 0f)
+                + string.Format(System.Globalization.CultureInfo.InvariantCulture, ",{0},{1:G5},{2:G5},{3},{4}", missileEvadeChosen ? 1 : 0,
+                    weaponManager != null && weaponManager.incomingMissileTime < 1e6f ? weaponManager.incomingMissileTime : -1f,
+                    weaponManager != null && weaponManager.incomingMissileVessel != null ? weaponManager.ThreatClosingTime(weaponManager.incomingMissileVessel) : -1f,
+                    recordedEvadeBranch, geometryHeldThisTick ? 1 : 0)
+                + "," + (currentStatus ?? "").Replace(',', ';'));
+            recordedFlyCalls = 0;
+            recordedVelocityDirection = velDir;
             if (++flightRecorderLines % 100 == 0) flightRecorder.Flush();
         }
 
@@ -3840,7 +3898,7 @@ namespace BDArmory.Control
             if (Time.time - lastSteeringMetricsLogTime > 10f)
             {
                 lastSteeringMetricsLogTime = Time.time;
-                Debug.Log($"[BDArmory.BDModulePilotAI]: SteeringMetrics {vessel.vesselName} adaptive={adaptiveControl} aimTime={aimSamples * Time.fixedDeltaTime:F1}s aimRMS={(aimSamples > 0 ? Math.Sqrt(aimErrorSqrSum / aimSamples) : 0):F2}deg onTarget={(aimSamples > 0 ? 100.0 * aimOnTargetSamples / aimSamples : 0):F1}% stickChange={(steerSamples > 0 ? steerChangeSum / steerSamples : 0):F4}/frame confidence={controlCore.pitch.Confidence:F2}/{controlCore.yaw.Confidence:F2}/{controlCore.roll.Confidence:F2} authority={controlCore.pitch.Authority:G3}/{controlCore.yaw.Authority:G3}/{controlCore.roll.Authority:G3} thrustAuthority={constAuthority.x:G3}/{constAuthority.z:G3}/{constAuthority.y:G3} rollLead={controlCore.roll.LeadTime:F2}s vipFlee={vipFleeTicks * Time.fixedDeltaTime:F1}s escort={escortTicks * Time.fixedDeltaTime:F1}s escortRecalls={escortRecallCount} team={(WeaponManager != null && WeaponManager.Team != null ? WeaponManager.Team.Name : "none")} snapshot={snapshotTicks * Time.fixedDeltaTime:F1}s stalemateBreaks={stalemateBreakCount} missileShotsHeld={missileShotsHeldForTerrain} shotsHeldForOdds={missileShotsHeldForOdds} shotsHeldForTiming={missileShotsHeldForTiming} radarPickSwitches={radarPickSwitches} bfm(s)=offensive {offensiveTicks * Time.fixedDeltaTime:F0}/defensive {defensiveTicks * Time.fixedDeltaTime:F0}/neutral {neutralTicks * Time.fixedDeltaTime:F0}/lag {lagPursuitTicks * Time.fixedDeltaTime:F0}/pure {purePursuitTicks * Time.fixedDeltaTime:F0}/lead {leadPursuitTicks * Time.fixedDeltaTime:F0} blindSpot={(WeaponManager != null ? WeaponManager.VisualBlindSpotSamples : 0)} bodyBlocked={(WeaponManager != null ? WeaponManager.VisualBlockedSamples : 0)} missileCoasts={MissileBase.radarCoastCount} seekerHandBacks={MissileBase.seekerHandBackCount} noisyLockTicks={MissileBase.noisyLockTicks} visualRange={(targetVessel != null && WeaponManager != null ? WeaponManager.VisualSample(targetVessel).range : 0):F0}m targetDistance={(targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f):F0}m surfaceRate={controlCore.pitch.actuatorRate:G3}/{controlCore.yaw.actuatorRate:G3}/{controlCore.roll.actuatorRate:G3} q={vessel.dynamicPressurekPa:F1}kPa speed={vessel.srfSpeed:F0} machFactor={liftMachFactor:F2} alt={vessel.radarAltitude:F0} modelCost={(controlCoreTimedFrames > 0 ? controlCoreTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / controlCoreTimedFrames : 0):F2}us/tick tactics(s)=defensive {defensiveBreakTicks * Time.fixedDeltaTime:F1}/highYoYo {highYoYoTicks * Time.fixedDeltaTime:F1}/lowYoYo {lowYoYoTicks * Time.fixedDeltaTime:F1}/crank {crankTicks * Time.fixedDeltaTime:F1}/pump {pumpTicks * Time.fixedDeltaTime:F1}/offset {offsetTicks * Time.fixedDeltaTime:F1}/oneCircle {oneCircleTicks * Time.fixedDeltaTime:F1}/climb {energyClimbTicks * Time.fixedDeltaTime:F1}/zoom {zoomTicks * Time.fixedDeltaTime:F1} diveLimited={diveLimitTicks * Time.fixedDeltaTime:F1}s climbLimited={climbLimitTicks * Time.fixedDeltaTime:F1}s liftCapability={LiftCapability:F1} energyExtends={energyExtendCount} flareSalvos={preemptiveFlareSalvos} radarSilenced={radarSilenceCount} hideHeat={rearAspectHeatThreat} offAspectLimit={offAspectLimit:F0} flaps={flapsDeployed} bestTurnSpeed={bestTurnSpeed:F0} turnRadius={turnRadius:F0} planner={bfmPlanner} bfm={bfmTicks * Time.fixedDeltaTime:F1}s bfmReplans={bfmReplans} bfmAimHandovers={bfmAimHandovers} energyModel={fullThrustAccel:F1}/{dragCoefficients[0]:F3}/{dragCoefficients[1]:F3} rollRate={observedRollRate:F1} flyoutEvasion={missileFlyoutEvasion} evasionFlyouts={flyoutEvaluations} launchBays={(WeaponManager != null ? $"waits {WeaponManager.launchBayWaits}/{WeaponManager.launchBayWaitTime:F1}s preOpen {WeaponManager.launchBayPreOpens} aborts {WeaponManager.launchBayAborts} notReady {WeaponManager.launchBayNotReady} timeouts {WeaponManager.launchBayTimeouts} open {WeaponManager.LaunchBayOpenSeconds:F0}s" : "none")} rcsExposure={BDAStealth.Patches.Exposure(vessel):F2} governor={controlCore.pitchGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.yawGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.rollGovernor.Gain((float)vessel.dynamicPressurekPa):F2} governorLowest={controlCore.pitchGovernor.LowestGain:F2}/{controlCore.yawGovernor.LowestGain:F2}/{controlCore.rollGovernor.LowestGain:F2} reversals={controlCore.pitchGovernor.ReversalRate:F1}/{controlCore.yawGovernor.ReversalRate:F1}/{controlCore.rollGovernor.ReversalRate:F1} flips={controlCore.pitchGovernor.FlipRate:F1}/{controlCore.yawGovernor.FlipRate:F1}/{controlCore.rollGovernor.FlipRate:F1} {PlannerMetrics()} {SalvoMetrics()} {BFMMetrics()} {SectionMetrics()} {MatchupMetrics()} {GunMetrics()} status={currentStatus}");
+                Debug.Log($"[BDArmory.BDModulePilotAI]: SteeringMetrics {vessel.vesselName} adaptive={AdaptiveActive} newControl={NewControl} commitment={NewCommitment} geometryHeld={geometryHoldTicks * Time.fixedDeltaTime:F1}s aimTime={aimSamples * Time.fixedDeltaTime:F1}s aimRMS={(aimSamples > 0 ? Math.Sqrt(aimErrorSqrSum / aimSamples) : 0):F2}deg onTarget={(aimSamples > 0 ? 100.0 * aimOnTargetSamples / aimSamples : 0):F1}% stickChange={(steerSamples > 0 ? steerChangeSum / steerSamples : 0):F4}/frame confidence={controlCore.pitch.Confidence:F2}/{controlCore.yaw.Confidence:F2}/{controlCore.roll.Confidence:F2} authority={controlCore.pitch.Authority:G3}/{controlCore.yaw.Authority:G3}/{controlCore.roll.Authority:G3} thrustAuthority={constAuthority.x:G3}/{constAuthority.z:G3}/{constAuthority.y:G3} rollLead={controlCore.roll.LeadTime:F2}s vipFlee={vipFleeTicks * Time.fixedDeltaTime:F1}s escort={escortTicks * Time.fixedDeltaTime:F1}s escortRecalls={escortRecallCount} team={(WeaponManager != null && WeaponManager.Team != null ? WeaponManager.Team.Name : "none")} snapshot={snapshotTicks * Time.fixedDeltaTime:F1}s stalemateBreaks={stalemateBreakCount} missileShotsHeld={missileShotsHeldForTerrain} shotsHeldForOdds={missileShotsHeldForOdds} shotsHeldForTiming={missileShotsHeldForTiming} radarPickSwitches={radarPickSwitches} bfm(s)=offensive {offensiveTicks * Time.fixedDeltaTime:F0}/defensive {defensiveTicks * Time.fixedDeltaTime:F0}/neutral {neutralTicks * Time.fixedDeltaTime:F0}/lag {lagPursuitTicks * Time.fixedDeltaTime:F0}/pure {purePursuitTicks * Time.fixedDeltaTime:F0}/lead {leadPursuitTicks * Time.fixedDeltaTime:F0} blindSpot={(WeaponManager != null ? WeaponManager.VisualBlindSpotSamples : 0)} bodyBlocked={(WeaponManager != null ? WeaponManager.VisualBlockedSamples : 0)} missileCoasts={MissileBase.radarCoastCount} seekerHandBacks={MissileBase.seekerHandBackCount} noisyLockTicks={MissileBase.noisyLockTicks} visualRange={(targetVessel != null && WeaponManager != null ? WeaponManager.VisualSample(targetVessel).range : 0):F0}m targetDistance={(targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f):F0}m surfaceRate={controlCore.pitch.actuatorRate:G3}/{controlCore.yaw.actuatorRate:G3}/{controlCore.roll.actuatorRate:G3} q={vessel.dynamicPressurekPa:F1}kPa speed={vessel.srfSpeed:F0} machFactor={liftMachFactor:F2} alt={vessel.radarAltitude:F0} modelCost={(controlCoreTimedFrames > 0 ? controlCoreTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / controlCoreTimedFrames : 0):F2}us/tick tactics(s)=defensive {defensiveBreakTicks * Time.fixedDeltaTime:F1}/highYoYo {highYoYoTicks * Time.fixedDeltaTime:F1}/lowYoYo {lowYoYoTicks * Time.fixedDeltaTime:F1}/crank {crankTicks * Time.fixedDeltaTime:F1}/pump {pumpTicks * Time.fixedDeltaTime:F1}/offset {offsetTicks * Time.fixedDeltaTime:F1}/oneCircle {oneCircleTicks * Time.fixedDeltaTime:F1}/climb {energyClimbTicks * Time.fixedDeltaTime:F1}/zoom {zoomTicks * Time.fixedDeltaTime:F1} diveLimited={diveLimitTicks * Time.fixedDeltaTime:F1}s climbLimited={climbLimitTicks * Time.fixedDeltaTime:F1}s liftCapability={LiftCapability:F1} energyExtends={energyExtendCount} flareSalvos={preemptiveFlareSalvos} radarSilenced={radarSilenceCount} hideHeat={rearAspectHeatThreat} offAspectLimit={offAspectLimit:F0} flaps={flapsDeployed} bestTurnSpeed={bestTurnSpeed:F0} turnRadius={turnRadius:F0} planner={bfmPlanner} bfm={bfmTicks * Time.fixedDeltaTime:F1}s bfmReplans={bfmReplans} bfmAimHandovers={bfmAimHandovers} energyModel={fullThrustAccel:F1}/{dragCoefficients[0]:F3}/{dragCoefficients[1]:F3} rollRate={observedRollRate:F1} flyoutEvasion={missileFlyoutEvasion} evasionFlyouts={flyoutEvaluations} launchBays={(WeaponManager != null ? $"waits {WeaponManager.launchBayWaits}/{WeaponManager.launchBayWaitTime:F1}s preOpen {WeaponManager.launchBayPreOpens} aborts {WeaponManager.launchBayAborts} notReady {WeaponManager.launchBayNotReady} timeouts {WeaponManager.launchBayTimeouts} open {WeaponManager.LaunchBayOpenSeconds:F0}s" : "none")} rcsExposure={BDAStealth.Patches.Exposure(vessel):F2} governor={controlCore.pitchGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.yawGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.rollGovernor.Gain((float)vessel.dynamicPressurekPa):F2} governorLowest={controlCore.pitchGovernor.LowestGain:F2}/{controlCore.yawGovernor.LowestGain:F2}/{controlCore.rollGovernor.LowestGain:F2} reversals={controlCore.pitchGovernor.ReversalRate:F1}/{controlCore.yawGovernor.ReversalRate:F1}/{controlCore.rollGovernor.ReversalRate:F1} flips={controlCore.pitchGovernor.FlipRate:F1}/{controlCore.yawGovernor.FlipRate:F1}/{controlCore.rollGovernor.FlipRate:F1} {PlannerMetrics()} {SalvoMetrics()} {BFMMetrics()} {SectionMetrics()} {MatchupMetrics()} {GunMetrics()} status={currentStatus}");
             }
         }
         #endregion
@@ -4396,9 +4454,11 @@ namespace BDArmory.Control
             if (
                 missileThreat != null
                 && (missileThreatMB = VesselModuleRegistry.GetMissileBase(missileThreat)) != null // Modular missiles can lose the MMG part.
-                && ((closingTime = weaponManager.ThreatClosingTime(missileThreat)) <= weaponManager.evadeThreshold * (Committed && Time.time < missileEvadeHoldUntil ? missileEvadeHoldFactor : 1f))
+                && ((closingTime = weaponManager.ThreatClosingTime(missileThreat)) <= weaponManager.evadeThreshold * (Committed && Time.time < missileEvadeHoldUntil ? missileEvadeHoldFactor : 1f)
+                    || NewCommitment && missileEvadeChosen) // The decision to evade this missile was taken this tick on the weapon manager's estimate of its arrival; fly it.
             ) // Missile evasion
             {
+                recordedEvadeBranch = 1;
                 Vector3 targetDirection;
                 bool overrideThrottle = false;
                 Vector3d vesselVel = vessel.Velocity();
@@ -4575,6 +4635,7 @@ namespace BDArmory.Control
             }
             else if (weaponManager.underFire)
             {
+                recordedEvadeBranch = 2;
                 if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.Append($"Dodging gunfire");
                 float threatDirectionFactor = Vector3.Dot(vesselTransform.up, threatRelativePosition.normalized);
                 //Vector3 axis = -Vector3.Cross(vesselTransform.up, threatRelativePosition);
@@ -4681,6 +4742,7 @@ namespace BDArmory.Control
             // Finish the break in the direction it was going instead of weaving or snapping back to the attack for a frame.
             if (Committed && Time.time < evasionHoldUntil && heldEvasionDirection.sqrMagnitude > 0.5f)
             {
+                recordedEvadeBranch = 3;
                 if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Holding the break for {evasionHoldUntil - Time.time:0.0}s");
                 FlyToPosition(s, FlightPosition(vessel.transform.position + 500f * heldEvasionDirection, minAltitude));
                 return;
@@ -4691,6 +4753,7 @@ namespace BDArmory.Control
             angleOff = Mathf.Clamp(angleOff, -45, 45);
             target += Quaternion.AngleAxis(angleOff, upDirection) * vesselTransform.up.ProjectOnPlanePreNormalized(upDirection) * 500f;
             //+ (Mathf.Sin (Time.time/3) * upDirection * minAltitude/3);
+            recordedEvadeBranch = 4;
             if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Evading unknown attacker");
             FlyToPosition(s, target);
         }

@@ -23,6 +23,8 @@ param(
     [string]$AwarenessCraft = "", # Only pilots of craft whose name contains this word use the warning-receiver picture, no-escape shot, lofted launch, double notch, drag and masking.
     [string]$GunneryCraft = "", # Only pilots of craft whose name contains this word use the gun employment range, flight-path lift measure, clean drag fit and planner speed floor.
     [string]$AltitudeCraft = "", # Only pilots of craft whose name contains this word climb for height over the target before missile shots.
+    [string]$ControlCraft = "", # Only pilots of craft whose name contains this word fly the reworked steering control (adaptive model, governor, aim-rate damping).
+    [string]$CommitCraft = "", # Only pilots of craft whose name contains this word hold their engagement geometry and fly every missile break they decide on.
     [switch]$Sample, # BDAPerf's sampling profiler with load/spawn stacks.
     [string]$PartPhoto = "", # Part names, comma-separated: close-ups of them on the craft every 30 s (ui_part_*.png in the run folder's ui).
     [int]$UiCapture = 0, # Seconds between screenshots of the interface (GameData/BDArmory/Logs/ui_*.png, moved to the run folder); 0: none.
@@ -72,6 +74,8 @@ if ($FlightRecorder) { $flags += "$pluginData\flight_recorder.on" }
 if ($UiCapture -gt 0) { $flags += "$pluginData\ui_capture.on" }
 if ($PartPhoto) { $flags += "$pluginData\part_photo.on" }
 if ($AltitudeCraft) { $flags += "$pluginData\test_altitude.on" }
+if ($ControlCraft) { $flags += "$pluginData\test_control.on" }
+if ($CommitCraft) { $flags += "$pluginData\test_commit.on" }
 $variantPatch = "$Ksp\GameData\Custom\Patches\zzFightVariants.cfg"
 Add-HarnessCleanup ($flags + $variantPatch)
 foreach ($f in $flags) { Set-Content $f "" }
@@ -82,6 +86,8 @@ if ($GunneryCraft) { Set-Content "$pluginData\test_gunnery.on" $GunneryCraft }
 if ($UiCapture -gt 0) { Set-Content "$pluginData\ui_capture.on" "$UiCapture" }
 if ($PartPhoto) { Set-Content "$pluginData\part_photo.on" $PartPhoto }
 if ($AltitudeCraft) { Set-Content "$pluginData\test_altitude.on" $AltitudeCraft }
+if ($ControlCraft) { Set-Content "$pluginData\test_control.on" $ControlCraft }
+if ($CommitCraft) { Set-Content "$pluginData\test_commit.on" $CommitCraft }
 if ($PatchFile) { Copy-Item $PatchFile $variantPatch -Force }
 if ($ShotModel) { Copy-Item $ShotModel "$pluginData\shot_model.cfg" -Force } # Backed up (or marked for removal) with the other game files.
 try {

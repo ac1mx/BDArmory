@@ -410,6 +410,49 @@ namespace BDArmory.Control
             heldEvasionDirection = direction.normalized;
             evasionHoldUntil = Time.time + committedEvasionTime;
         }
+        // Comparison in one fight: GameData/BDArmory/PluginData/test_commit.on holds a word; only pilots of craft whose name contains it
+        // hold their engagement geometry (CommitGeometry) and fly the missile break whenever they decided to evade.
+        static readonly string commitmentTestCraft = ReadTestWord("test_commit.on");
+        bool NewCommitment => string.IsNullOrEmpty(commitmentTestCraft) || (vessel != null && vessel.vesselName.Contains(commitmentTestCraft));
+        const float geometryDwell = 1.5f; // s
+        string committedGeometry;
+        Vessel committedGeometryTarget;
+        float committedGeometrySince = -100f, lastGeometryTime = -100f;
+        Vector3 committedGeometryDirection;
+        int geometryHoldTicks;
+        bool geometryHeldThisTick;
+        /// <summary>
+        /// The geometry flown at the target (a tactic's name, "Height", or null for straight at it) is kept for geometryDwell once taken up:
+        /// another that wants to replace it sooner flies the kept one's last direction until then. Each tactic's gate is a threshold on a
+        /// quantity that wanders across it (range, aspect, shot estimates, climb still wanted), and without this the craft swings its nose
+        /// between two directions tens of degrees apart several times a second. Not held: aiming the guns, a missile shot about to be taken,
+        /// the abort, the merge turn and formation slots, or the first tick back from anything else.
+        /// </summary>
+        void CommitGeometry(Vessel v, string geometry, ref Vector3 target)
+        {
+            Vector3 offset = target - vesselTransform.position;
+            bool continuing = NewCommitment && Committed && v == committedGeometryTarget && Time.time - lastGeometryTime < 0.1f;
+            lastGeometryTime = Time.time;
+            committedGeometryTarget = v;
+            geometryHeldThisTick = false;
+            if (geometry == committedGeometry && continuing) { committedGeometryDirection = offset.normalized; return; }
+            bool exempt = !continuing || (steerMode == SteerModes.Aiming && WeaponManager.CurrentMissile == null) // Guns; a missile's nose-on is the shot gate below.
+                || geometry == "Abort" || geometry == "One Circle" || geometry == "Truck slot" || committedGeometry == "One Circle" || committedGeometry == "Truck slot"
+                || (ShotEstimate >= 0f && ShotEstimate >= 0.8f * ShotThreshold);
+            if (exempt || Time.time - committedGeometrySince >= geometryDwell || committedGeometryDirection.sqrMagnitude < 0.5f)
+            {
+                committedGeometry = geometry;
+                committedGeometrySince = Time.time;
+                committedGeometryDirection = offset.normalized;
+                return;
+            }
+            target = vesselTransform.position + offset.magnitude * committedGeometryDirection;
+            SetStatus(committedGeometry == null ? "Engaging" : $"Engaging ({committedGeometry})");
+            ++geometryHoldTicks;
+            geometryHeldThisTick = true;
+        }
+
+        bool missileEvadeChosen; // UpdateAI decided this tick to evade the incoming missile.
         bool aimingLatched;
         int missileShotsHeldForOdds;
 

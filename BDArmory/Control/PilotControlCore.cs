@@ -320,6 +320,9 @@ namespace BDArmory.Control
         // alternates ±0.03 at 25 Hz (its damping gain times its control power is more than one 0.02 s tick can follow). Tick-to-tick
         // reversals of the stick's change: 12/s flags 70–80% of its flight above 120 kPa and 2% below 30 kPa.
         const float flipFloor = 0.02f, flipMemory = 0.5f, flipHuntingRate = 12f, flipCalmRate = 6f;
+        /// <summary>Whether tick-to-tick flips count as hunting. A controller whose damping can't sustain a half-physics-rate oscillation
+        /// (its rate is averaged over two ticks) still dithers at that rate from measurement noise, which is no reason to cut its gain.</summary>
+        public bool countFlips = true;
         float extreme, previousExtreme, lastStick, lastStep;
         int direction;
         bool started;
@@ -370,9 +373,10 @@ namespace BDArmory.Control
                 extreme = stick;
             }
 
-            float factor, excess = Math.Max(ReversalRate / huntingRate, FlipRate / flipHuntingRate) - 1f;
+            float flipRate = countFlips ? FlipRate : 0f;
+            float factor, excess = Math.Max(ReversalRate / huntingRate, flipRate / flipHuntingRate) - 1f;
             if (excess > 0f) factor = (float)Math.Exp(-cutRate * Math.Min(excess, 2f) * dt);
-            else if (ReversalRate < calmRate && FlipRate < flipCalmRate) factor = (float)Math.Exp(recoverRate * dt);
+            else if (ReversalRate < calmRate && flipRate < flipCalmRate) factor = (float)Math.Exp(recoverRate * dt);
             else return;
             Locate(dynPres, out int i, out float w);
             gain[i] = Math.Max(minGain, Math.Min(1f, gain[i] * (float)Math.Pow(factor, 1f - w)));
