@@ -430,6 +430,8 @@ namespace BDArmory.Radar
 
         public void EnableRadar()
         {
+            // An emitting radar stays off while its pilot's flight orders hold emissions (passive receivers and sonar aren't held).
+            if (sonarMode == SonarModes.None && canScan && WeaponManager != null && WeaponManager.AI is Control.BDModulePilotAI emconPilot && emconPilot.EmissionsHeld) return;
             radarEnabled = true;
             EnsureVesselRadarData(true);
 

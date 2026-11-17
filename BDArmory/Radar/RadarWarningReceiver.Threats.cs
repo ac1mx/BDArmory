@@ -27,7 +27,12 @@ namespace BDArmory.Radar
             public float detectability = 1f; // Its radar's rwrDetectability: below 1 (low probability of intercept) it takes longer to classify.
             public string code;             // Threat library code, once classified.
             public bool friendly = true, missile; // Friendly until its side is known to be hostile.
-            public Vector3 position;        // Where it was when last heard.
+            Vector3d geo;
+            /// <summary>Where it was when last heard. Kept as latitude, longitude and altitude: the world frame moves under a stored world position whenever the floating origin shifts (a vessel switch moves it by the distance between the craft).</summary>
+            public Vector3 position
+            {
+                get => VectorUtils.GetWorldSurfacePostion(geo, FlightGlobals.currentMainBody);                set => geo = VectorUtils.WorldPositionToGeoCoords(value, FlightGlobals.currentMainBody);
+            }
             public float firstHeard, lastHeard, lockHeard = -100f, launchHeard = -100f, reported = -100f;
             public float rangeError;        // Share by which the first range estimate is off.
             public EmitterStates State => missile ? EmitterStates.Missile

@@ -164,6 +164,7 @@
     <Compile Include="Control\PilotMissileDefence.cs" />
     <Compile Include="Control\PilotEngagement.cs" />
     <Compile Include="Control\PilotSection.cs" />
+    <Compile Include="Control\PilotOrders.cs" />
     <Compile Include="Control\PilotMatchup.cs" />
     <Compile Include="Stealth\*.cs" />
     <Compile Include="GPU\*.cs" />
@@ -283,6 +284,7 @@
     <Compile Include="Radar\VesselRadarData.Cockpit.cs" />
     <Compile Include="Radar\ViewScanResults.cs" />
     <Compile Include="Radar\VisualDetection.cs" />
+    <Compile Include="Radar\SurveillanceRadar.cs" />
     <Compile Include="Services\IEngageService.cs" />
     <Compile Include="Services\INotificableService.cs" />
     <Compile Include="Services\NotificableService.cs" />

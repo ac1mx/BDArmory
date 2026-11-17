@@ -38,6 +38,7 @@ function Backup-GameFiles([string]$Ksp, [string]$Out) {
         "TUFX.cfg"         = "$Ksp\GameData\TUFX\TUFX.cfg"
         "BDArmory.dll"     = "$Ksp\GameData\BDArmory\Plugins\BDArmory.dll"
         "shot_model.cfg"   = "$Ksp\GameData\BDArmory\PluginData\shot_model.cfg"
+        "pre_settings.cfg" = "$Ksp\GameData\PhysicsRangeExtender\settings.cfg" # Spawning raises the PRE range for wide spawns.
     }
     foreach ($name in $script:HarnessFiles.Keys) {
         if (Test-Path $script:HarnessFiles[$name]) { Copy-Item $script:HarnessFiles[$name] "$Out\$name.before" -Force }

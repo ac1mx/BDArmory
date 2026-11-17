@@ -1269,7 +1269,7 @@ namespace BDArmory.UI
                     db.Current.Value.Remove(target);
         }
 
-        public static void ReportVessel(Vessel v, MissileFire reporter, bool radar = false, bool initialSetup = false)
+        public static void ReportVessel(Vessel v, MissileFire reporter, bool radar = false, bool initialSetup = false, string sensor = null)
         {
             if (!v) return;
             if (!reporter) return;
@@ -1319,6 +1319,7 @@ namespace BDArmory.UI
             {
                 AddTarget(info, reporter.Team);
                 info.detectedTime[reporter.Team] = Time.time; //time since last detected
+                info.lastReport[reporter.Team] = (reporter.vessel, sensor ?? (radar ? "radar" : null));
                 if (radar)
                 {
                     info.detected[reporter.Team] = true; //target is under radar detection

@@ -1959,7 +1959,9 @@ namespace BDArmory.Weapons.Missiles
             ml.TargetPosition = transform.position + (multiLauncher ? vessel.ReferenceTransform.up * 5000 : transform.forward * 5000); //set initial target position so if no target update, missileBase will count a miss if it nears this point or is flying post-thrust
             ml.MissileLaunch();
             GetMissileCount();
-            if (reloadableRail.railAmmo < 1 && reloadableRail.ammoCount > 0 || BDArmorySettings.INFINITE_ORDINANCE)
+            // Ready the next round whenever there is one: still in the launcher (railAmmo > 1 to start with) or in a magazine. Waiting for
+            // railAmmo to run out left a launcher holding several rounds marked launched (and hidden) after its first shot, for good.
+            if (reloadableRail.ammoCount > 0 || BDArmorySettings.INFINITE_ORDINANCE)
             {
                 if (!(reloadRoutine != null))
                 {

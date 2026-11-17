@@ -82,7 +82,7 @@ UI_ProgressBar(affectSymCounterparts = UI_Scene.None, controlEnabled = false, sc
         public void loadOrdnance(int tubesToReload)
         {
             if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.ModuleMissileRearm] reloading {tubesToReload} launchrails, {railAmmo} ordnance in launcher, queuing {tubesToReload - railAmmo} new munitions from magazine");
-            if (linkedMagazines.Count > 0 && ammoCount > 0 && railAmmo < tubesToReload) //no/not enough ammo internal to launcher? grab some from magazine
+            if (linkedMagazines != null && linkedMagazines.Count > 0 && ammoCount > 0 && railAmmo < tubesToReload) //no/not enough ammo internal to launcher? grab some from magazine
             {
                 int neededReloads = (int)(tubesToReload - railAmmo);
                 for (int t2r = 0; t2r < neededReloads; t2r++)

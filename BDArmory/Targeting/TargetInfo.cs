@@ -35,6 +35,7 @@ namespace BDArmory.Targeting
         Dictionary<BDTeam, List<MissileFire>> friendliesEngaging = [];
         public Dictionary<BDTeam, bool> detected = [];
         public Dictionary<BDTeam, float> detectedTime = [];
+        public Dictionary<BDTeam, (Vessel reporter, string sensor)> lastReport = []; // Who last put this target on each team's picture, and with what sensor (radar, IRST; null otherwise).
 
         public float radarBaseSignature = -1;
         public bool radarBaseSignatureNeedsUpdate = true;

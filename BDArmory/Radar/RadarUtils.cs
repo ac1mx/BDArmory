@@ -2801,7 +2801,7 @@ namespace BDArmory.Radar
                                 // detected by irst
                                 if (myWpnManager != null)
                                 {
-                                    BDATargetManager.ReportVessel(loadedvessels.Current, myWpnManager, true);
+                                    BDATargetManager.ReportVessel(loadedvessels.Current, myWpnManager, true, sensor: "IRST");
                                 }
                                 irst.ReceiveContactData(new TargetSignatureData(loadedvessels.Current, signature), signature);
                                 if (BDArmorySettings.DEBUG_RADAR) Debug.Log("[IRSTdebugging] sent data to IRST for " + loadedvessels.Current.GetName() + "'s thermalSig");
@@ -3058,7 +3058,9 @@ namespace BDArmory.Radar
 
                         MissileFire tgtMF = loadedvessels.Current.ActiveController().WM;
 
-                        if (!canSeeTarget && RWR && RWR.rwrEnabled)
+                        // A pilot flying flight orders gets no position from the warning receiver alone: it measures a bearing, and
+                        // the pilot's passive ranging turns bearings into a fix (PilotOrders).
+                        if (!canSeeTarget && RWR && RWR.rwrEnabled && !(myWpnManager.AI is BDModulePilotAI orderedPilot && orderedPilot.orders != null))
                         {
                             float maxRadarRWRRange = 0f;
                             if (tgtMF && tgtMF.vesselRadarData) maxRadarRWRRange = tgtMF.vesselRadarData.MaxRadarRange() * 2;

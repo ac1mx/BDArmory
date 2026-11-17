@@ -165,8 +165,8 @@ namespace BDArmory.Control
             foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(v))
             {
                 if (missile == null || missile.HasFired || !missile.engageAir) continue;
-                if (missile.TargetingMode == MissileBase.TargetingModes.Heat) ++shortRange;
-                else if (missile.TargetingMode == MissileBase.TargetingModes.Radar || missile.TargetingMode == MissileBase.TargetingModes.Inertial) ++longRange;
+                if (missile.TargetingMode == MissileBase.TargetingModes.Heat) shortRange += RoundsAboard(missile);
+                else if (missile.TargetingMode == MissileBase.TargetingModes.Radar || missile.TargetingMode == MissileBase.TargetingModes.Inertial) longRange += RoundsAboard(missile);
             }
         }
 
@@ -286,7 +286,7 @@ namespace BDArmory.Control
             if (weaponManager.GetMissilesAway(weaponManager.currentTarget).numAway > 0) return false;
             int spare = 0;
             foreach (var other in VesselModuleRegistry.GetModules<MissileBase>(vessel))
-                if (other != null && !other.HasFired && other.TargetingMode == missile.TargetingMode) ++spare;
+                if (other != null && !other.HasFired && other.TargetingMode == missile.TargetingMode) spare += RoundsAboard(other);
             return spare >= 2;
         }
 
@@ -297,23 +297,28 @@ namespace BDArmory.Control
             return Vector3.Dot(v.srf_vel_direction, toUs) < Mathf.Cos(angle * Mathf.Deg2Rad) * toUs.magnitude;
         }
 
-        /// <summary>A launch below the normal threshold to put the opponent on the defensive before it can shoot.</summary>
+        /// <summary>
+        /// A launch below the normal threshold to put the opponent on the defensive before it can shoot. A missile truck (flight orders
+        /// huntHighValue) lobs them from further out and without waiting for the opponent's shot: its rounds are there to be spent at range.
+        /// </summary>
         bool ForcingShotWanted(MissileFire weaponManager, Vessel target, MissileBase missile, in ShotModel.Features features)
         {
             if (!PlanActive(weaponManager) || !PictureOf(target)) return false;
+            bool truck = orders != null && orders.huntHighValue;
             if (ShotEstimate >= ShotThreshold) return false; // A good shot held for a better one isn't a forcing shot.
-            if (ShotEstimate < forcingFloor || !features.valid || !features.straight.reached) return false; // It has to get there if the target does nothing.
-            if (!picture.detectedByTarget) return false; // Unseen: don't give ourselves away for a poor shot.
-            if (picture.theirLong + picture.theirShort == 0) return false; // Nothing to force: press instead.
+            if (ShotEstimate < (truck ? truckForcingFloor : forcingFloor) || !features.valid || !features.straight.reached) return false; // It has to get there if the target does nothing.
+            if (!picture.detectedByTarget && !truck) return false; // Unseen: don't give ourselves away for a poor shot.
+            if (picture.theirLong + picture.theirShort == 0 && !truck) return false; // Nothing to force: press instead.
             if (TurnedAway(target, 60f)) return false; // Already not pointing at us.
             if (Time.time - lastForcingTime < forcingInterval) return false;
             if (weaponManager.GetMissilesAway(weaponManager.currentTarget).numAway > 0) return false;
             int spare = 0;
             foreach (var other in VesselModuleRegistry.GetModules<MissileBase>(vessel))
-                if (other != null && !other.HasFired && other.TargetingMode == missile.TargetingMode) ++spare;
+                if (other != null && !other.HasFired && other.TargetingMode == missile.TargetingMode) spare += RoundsAboard(other);
             if (spare < 2) return false; // The last one is kept for a real shot.
-            return picture.theirShotLater >= forcingPressure || picture.theirShot >= ShotEstimate; // It's about to have a shot, or already has the better one.
+            return truck || picture.theirShotLater >= forcingPressure || picture.theirShot >= ShotEstimate; // It's about to have a shot, or already has the better one.
         }
+        const float truckForcingFloor = 0.05f;
 
         /// <summary>While the target's radar hasn't found us, a shot is held for a smaller gain than usual: there's no threat to hurry us.</summary>
         bool UnseenByTarget(MissileFire weaponManager, Vessel target) => PlanActive(weaponManager) && PictureOf(target) && !picture.detectedByTarget && !weaponManager.missileIsIncoming;

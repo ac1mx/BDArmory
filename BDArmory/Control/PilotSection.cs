@@ -19,7 +19,10 @@ namespace BDArmory.Control
     ///  - drag: defensive with a free wingman near, turn the fight towards it;
     ///  - defensive split and deconfliction: in a close fight, keep clear of the wingman's flight path, and split when one bandit is on both;
     ///  - support: in the wingman's fight with our target, stand off at missile range and keep height rather than crowd its circle;
-    ///  - 1v2: the nearest other bandit pointing at us is planned against as a threat in the close-in fight.
+    ///  - 1v2: the nearest other bandit pointing at us is planned against as a threat in the close-in fight;
+    ///  - flight orders: the wingman is the flight-mate, sorting stays within mutual support of the lead, the pair is held together
+    ///    at missile range and kept at height while it has radar rounds (SectionTether), and the other side's AWACS is a target once
+    ///    it can be reached (HighValueBonus).
     /// Counted for the steering metrics log; the whole layer can be switched off for comparison.
     /// </summary>
     public partial class BDModulePilotAI
@@ -57,13 +60,16 @@ namespace BDArmory.Control
             if (section.wingman != null) sectionWingmanTime += Time.time - section.time > 3f * sectionInterval ? 0f : Time.time - section.time;
             section.time = Time.time;
 
-            // Wingman: the nearest airborne teammate flown by a pilot AI.
+            // Wingman: the nearest airborne teammate flown by a pilot AI; with flight orders, only our flight-mate (not a support craft
+            // that happens to be nearer).
             section.wingman = null; section.wingmanAI = null; section.wingmanTarget = null; section.wingmanAttacker = null;
             section.wingmanMissilesAtOurTarget = 0;
             float best = sectionRange;
+            Vessel flightMate = orders != null ? WingmanForOrders() : null;
             foreach (var other in BDATargetManager.LoadedVessels)
             {
                 if (other == null || other == vessel || !other.loaded || other.LandedOrSplashed || other.IsMissile()) continue;
+                if (orders != null && other != flightMate) continue;
                 var controller = other.ActiveController();
                 if (controller == null || controller.WM == null || controller.WM.Team != weaponManager.Team || controller.AI is not BDModulePilotAI ai) continue;
                 float distance = (other.CoM - vessel.CoM).magnitude;
@@ -127,12 +133,23 @@ namespace BDArmory.Control
         #region Target choice
         /// <summary>
         /// Extra target-priority score from the section (added to the weapon manager's weighted sum): a bandit on the wingman's tail,
-        /// unless one is on ours (sandwich), and the launcher of a missile coming at the wingman.
+        /// unless one is on ours (sandwich), and the launcher of a missile coming at the wingman; with flight orders, less for the
+        /// lead's own target while another bandit is near enough to take without leaving the lead (sort), and more for the other
+        /// side's high-value asset (an AWACS) when we can reach it.
         /// </summary>
         public float SectionTargetBonus(Vessel candidate)
         {
-            if (candidate == null || !SectionActive(WeaponManager) || !SectionFresh) return 0f;
+            if (candidate == null) return 0f;
             float bonus = 0f;
+            // Sort (flight orders): a wingman leaves its lead's target to the lead when there's another fighter to take within mutual
+            // support of the lead (not a flanker or an AWACS far off: chasing that splits the section).
+            if (orders != null && orders.lead != null && orders.lead.vessel != null && orders.lead.orders != null && orders.lead.orders.flight == orders.flight
+                && orders.lead.targetVessel == candidate && WeaponManager != null)
+                foreach (var info in BDATargetManager.TargetList(WeaponManager.Team))
+                    if (info != null && info.Vessel != null && info.Vessel != candidate && !info.isMissile && !info.Vessel.LandedOrSplashed && !IsHighValueAsset(info.Vessel)
+                        && (info.Vessel.CoM - orders.lead.vessel.CoM).magnitude < (candidate.CoM - orders.lead.vessel.CoM).magnitude + supportRange) { bonus -= 1.5f; break; }
+            if (orders != null && IsHighValueAsset(candidate)) bonus += HighValueBonus(candidate);
+            if (!SectionActive(WeaponManager) || !SectionFresh) return bonus;
             if (candidate == section.wingmanAttacker && section.ourAttacker == null) bonus += 2f;
             var wingmanWM = section.wingman.ActiveController().WM;
             if (wingmanWM != null && wingmanWM.missileIsIncoming && wingmanWM.incomingMissileVessel != null)
@@ -141,6 +158,70 @@ namespace BDArmory.Control
                 if (incoming != null && incoming.SourceVessel == candidate && incoming.TargetingMode == MissileBase.TargetingModes.Radar && !incoming.ActiveRadar) bonus += 1f; // Kill its guidance.
             }
             return bonus;
+        }
+
+        /// <summary>
+        /// Priority for the other side's AWACS (flight orders): always a hunter's first target (most once in reach of its longest
+        /// radar missile); for anyone else, once a radar missile of ours reaches it and no hostile fighter is close enough to be the
+        /// first threat.
+        /// </summary>
+        float HighValueBonus(Vessel asset)
+        {
+            var weaponManager = WeaponManager;
+            if (weaponManager == null) return 0f;
+            float distance = (asset.CoM - vessel.CoM).magnitude, reach = 0f;
+            foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(vessel))
+            {
+                if (missile == null || missile.HasFired || !missile.engageAir || missile.TargetingMode != MissileBase.TargetingModes.Radar) continue;
+                reach = Mathf.Max(reach, MissileLaunchParams.GetDynamicLaunchParams(missile, asset.Velocity(), asset.CoM).maxLaunchRange);
+            }
+            if (orders.huntHighValue) return distance < 1.2f * reach ? 4f : 1.5f;
+            if (reach <= 0f || distance > reach) return 0f;
+            foreach (var info in BDATargetManager.TargetList(weaponManager.Team))
+                if (info != null && info.Vessel != null && info.Vessel != asset && !info.isMissile && !info.Vessel.LandedOrSplashed && !IsHighValueAsset(info.Vessel)
+                    && (info.Vessel.CoM - vessel.CoM).magnitude < 0.8f * reach) return 0.5f; // A fighter in range comes first.
+            return 2f;
+        }
+        #endregion
+
+        #region Mutual support
+        const float supportRange = 18000f, supportBreak = 30000f, supportFloorDrop = 3000f;
+        int sectionTetherTicks;
+
+        /// <summary>
+        /// Mutual support (flight orders): while the fight is still at missile range, beyond supportRange of our flight-mate the fly-to
+        /// point turns towards it, all the way by supportBreak, so a pair sorting two bandits doesn't split across the sky; and at any
+        /// range, while we have radar rounds, it is kept no more than supportFloorDrop below the flight's altitude (a bandit low or
+        /// diving away isn't followed down to the deck, where the height and speed our missiles need are lost and its close-in game
+        /// wins). Not while defending, or with the nose needed for a shot about to be taken.
+        /// </summary>
+        bool SectionTether(float distanceToTarget, ref Vector3 target)
+        {
+            if (orders == null || IsEvading || (ShotEstimate >= 0f && ShotEstimate >= 0.8f * ShotThreshold)) return false;
+            bool changed = false;
+            Vector3 fly = target - vessel.CoM;
+            float floor = OrdersAltitude() - supportFloorDrop;
+            float flyAltitude = (float)FlightGlobals.getAltitudeAtPos(target);
+            CountMissiles(vessel, out int longRange, out _);
+            if (flyAltitude < floor && longRange > 0) { target += (floor - flyAltitude) * upDirection; fly = target - vessel.CoM; changed = true; } // At any range while there are radar rounds to shoot down with.
+            Vessel mate = distanceToTarget > 10000f ? WingmanForOrders() : null;
+            if (mate != null && !mate.LandedOrSplashed && !(mate.ActiveController().AI is BDModulePilotAI mateAI && mateAI.OrdersRecovering))
+            {
+                Vector3 toMate = (mate.CoM - vessel.CoM).ProjectOnPlanePreNormalized(upDirection);
+                float separation = toMate.magnitude;
+                Vector3 horizontal = fly.ProjectOnPlanePreNormalized(upDirection);
+                if (separation > supportRange && horizontal.sqrMagnitude > 1f)
+                {
+                    float angle = Mathf.Clamp01((separation - supportRange) / (supportBreak - supportRange)) * Vector3.Angle(horizontal, toMate);
+                    Vector3 turned = Vector3.RotateTowards(horizontal.normalized, toMate.normalized, angle * Mathf.Deg2Rad, 0f) * horizontal.magnitude;
+                    target = vessel.CoM + turned + Vector3.Dot(fly, upDirection) * upDirection;
+                    changed = true;
+                }
+            }
+            if (!changed) return false;
+            ++sectionTetherTicks;
+            NoteTactic("Mutual support");
+            return true;
         }
         #endregion
 
@@ -226,8 +307,8 @@ namespace BDArmory.Control
         #endregion
 
         string SectionMetrics() => string.Format(System.Globalization.CultureInfo.InvariantCulture,
-            "section={0} wingman {1:F0}s sandwich {2:F1}s drag {3:F1}s split {4:F1}s support {5:F1}s grinder {6:F1}s bracket {7:F1}s sharedHolds {8}",
+            "section={0} wingman {1:F0}s sandwich {2:F1}s drag {3:F1}s split {4:F1}s support {5:F1}s grinder {6:F1}s bracket {7:F1}s sharedHolds {8} tether {9:F1}s",
             sectionTactics, sectionWingmanTime, sectionSandwichTicks * bfmReplanInterval, sectionDragTicks * bfmReplanInterval, sectionSplitTicks * bfmReplanInterval,
-            sectionSupportTicks * bfmReplanInterval, sectionGrinderTicks * Time.fixedDeltaTime, sectionBracketTicks * Time.fixedDeltaTime, sectionSharedHolds);
+            sectionSupportTicks * bfmReplanInterval, sectionGrinderTicks * Time.fixedDeltaTime, sectionBracketTicks * Time.fixedDeltaTime, sectionSharedHolds, sectionTetherTicks * Time.fixedDeltaTime);
     }
 }

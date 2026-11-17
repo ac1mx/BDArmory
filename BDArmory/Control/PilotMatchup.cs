@@ -61,8 +61,8 @@ namespace BDArmory.Control
             var theirWM = target.ActiveController().WM;
             matchup.ourSight = Mathf.Max(RadarSight(vessel, HeadOnRCS(target)), visualSight);
             matchup.theirSight = Mathf.Max(RadarSight(target, HeadOnRCS(vessel)), visualSight);
-            matchup.ourMissileReach = MissileReach(vessel);
-            matchup.theirMissileReach = theirWM != null ? MissileReach(target) : 0f;
+            matchup.ourMissileReach = MissileReach(vessel, target);
+            matchup.theirMissileReach = theirWM != null ? MissileReach(target, vessel) : 0f;
             matchup.ourReach = Mathf.Min(matchup.ourSight, matchup.ourMissileReach);
             matchup.theirReach = Mathf.Min(matchup.theirSight, matchup.theirMissileReach);
             const float reachFloor = 1500f; // Guns only: the merge.
@@ -84,7 +84,8 @@ namespace BDArmory.Control
                 + (ourGuns == theirGuns ? 0f : ourGuns ? 0.3f : -0.3f) + ((p.ourShort > 0) == (p.theirShort > 0) ? 0f : p.ourShort > 0 ? 0.3f : -0.3f);
 
             var previous = matchup.plan;
-            matchup.plan = ChoosePlan(matchup.bvrEdge, matchup.wvrEdge, previous);
+            matchup.plan = orders != null && orders.huntHighValue && p.ourLong > 0 ? FightPlan.Standoff // A missile truck fights from range: closing in only makes it the target.
+                : ChoosePlan(matchup.bvrEdge, matchup.wvrEdge, previous);
             if (matchup.plan != previous)
             {
                 ++matchupPlanChanges;
@@ -158,12 +159,16 @@ namespace BDArmory.Control
             return best;
         }
 
-        /// <summary>Longest launch range among the craft's unfired air-to-air missiles (m).</summary>
-        static float MissileReach(Vessel v)
+        /// <summary>
+        /// Longest launch range among the shooter's unfired air-to-air missiles against the target where both are now (m): the dynamic
+        /// launch envelope, so height and speed count (an R-37 from 12 km reaches twice its rated static range).
+        /// </summary>
+        static float MissileReach(Vessel shooter, Vessel target)
         {
             float best = 0f;
-            foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(v))
-                if (missile != null && !missile.HasFired && missile.engageAir) best = Mathf.Max(best, missile.GetEngagementRangeMax());
+            foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(shooter))
+                if (missile != null && !missile.HasFired && missile.engageAir)
+                    best = Mathf.Max(best, MissileLaunchParams.GetDynamicLaunchParams(missile, target.Velocity(), target.CoM).maxLaunchRange);
             return best;
         }
 

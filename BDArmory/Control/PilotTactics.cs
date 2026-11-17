@@ -57,6 +57,14 @@ namespace BDArmory.Control
         /// </summary>
         string SelectEngagementTactic(Vessel v, Vector3 vectorToTarget, float distanceToTarget, ref Vector3 target)
         {
+            if (TruckHoldsSlot(v, ref target)) return "Truck slot";
+            string tactic = EngagementTactic(v, vectorToTarget, distanceToTarget, ref target);
+            if (tactic != "One Circle" && SectionTether(distanceToTarget, ref target) && tactic == null) tactic = "Mutual support";
+            return tactic;
+        }
+
+        string EngagementTactic(Vessel v, Vector3 vectorToTarget, float distanceToTarget, ref Vector3 target)
+        {
             var weaponManager = WeaponManager;
             if (!TacticsAllowed(weaponManager) || v.LandedOrSplashed || weaponManager.currentTarget == null || weaponManager.currentTarget.Vessel != v)
             {
@@ -461,7 +469,7 @@ namespace BDArmory.Control
 
         // A shot is taken when its estimated chance of hitting (ShotModel) clears a threshold that depends on how many missiles are left:
         // with a full load a modest chance is worth a missile, the last ones are kept for good shots.
-        const float shotThresholdLast = 0.34f, shotThresholdPerMissile = 0.03f, shotThresholdFloor = 0.12f, shotThresholdTrained = -0.05f;
+        const float shotThresholdLast = 0.34f, shotThresholdPerMissile = 0.03f, shotThresholdFloor = 0.12f, shotThresholdTrained = -0.05f, closeFightRange = 15000f;
         public float ShotEstimate { get; private set; } = -1f;
         public float ShotThreshold { get; private set; }
 
@@ -477,6 +485,9 @@ namespace BDArmory.Control
         float shotDecisionTime = -1f;
         bool shotDecision;
 
+        /// <summary>Rounds an unfired launcher stands for: the one on the rail, or every round a reloading launcher holds.</summary>
+        static int RoundsAboard(MissileBase missile) => missile.reloadableRail != null ? Mathf.Max(missile.reloadableRail.ammoCount, 1) : 1;
+
         float ShotThresholdFor(int remaining) => Mathf.Clamp(shotThresholdLast - shotThresholdPerMissile * remaining, shotThresholdFloor, shotThresholdLast) + (pilotSkill <= 50f ? shotThresholdTrained : 0f);
 
         /// <summary>
@@ -489,10 +500,16 @@ namespace BDArmory.Control
             if (missile == null || target.LandedOrSplashed) { ShotEstimate = -1f; return true; }
             if (target == shotDecisionTarget && missile == shotDecisionMissile && Time.time - shotDecisionTime < shotDecisionInterval) return shotDecision;
             shotDecisionTarget = target; shotDecisionMissile = missile; shotDecisionTime = Time.time;
+            if (TruckReserves(target, missile)) { ShotEstimate = 0f; ShotThreshold = 1f; shotDecision = false; return false; } // Kept for the AWACS.
             int remaining = 0;
             foreach (var other in VesselModuleRegistry.GetModules<MissileBase>(vessel))
-                if (other != null && !other.HasFired) ++remaining;
+                if (other != null && !other.HasFired) remaining += RoundsAboard(other);
             ShotThreshold = ShotThresholdFor(remaining);
+            if (orders != null && orders.huntHighValue && IsHighValueAsset(target)) ShotThreshold = Mathf.Max(ShotThreshold, truckHighValueThreshold);
+            // A close fight: a heat missile still on the rail when it is decided is wasted, so inside its own range any fair chance is
+            // taken (the threshold of a full load), however few rounds are left.
+            if (missile.TargetingMode == MissileBase.TargetingModes.Heat && (target.CoM - vessel.CoM).magnitude < Mathf.Min(closeFightRange, missile.GetEngagementRangeMax()))
+                ShotThreshold = Mathf.Min(ShotThreshold, ShotThresholdFor(100));
             ShotEstimate = ShotModel.Estimate(missile, vessel, target, out var features);
             shotDecision = ShotEstimate >= ShotThreshold;
             if (shotDecision && !weaponManager.missileIsIncoming)
