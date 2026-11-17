@@ -4462,7 +4462,11 @@ namespace BDArmory.Control
                 Vector3 targetDirection;
                 bool overrideThrottle = false;
                 Vector3d vesselVel = vessel.Velocity();
-                if ((closingTime <= 1.5f) && (!weaponManager.isChaffing)) // Missile is about to impact, pull a hard turn
+                // Missile is about to impact, pull a hard turn. Not for one that passes wide or has gone past (its time to closest approach
+                // is then near zero too): that break would alternate with the turn back towards the target until the warning clears.
+                float hardBreakMiss = Mathf.Max(10f * missileThreatMB.GetBlastRadius(), 300f);
+                if ((closingTime <= 1.5f) && (!weaponManager.isChaffing)
+                    && (!NewCommitment || vessel.PredictClosestApproachSqrSeparation(missileThreat, 2f) < hardBreakMiss * hardBreakMiss))
                 {
                     if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Missile about to impact! pull away!");
 
