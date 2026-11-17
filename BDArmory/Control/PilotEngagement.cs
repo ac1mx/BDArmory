@@ -78,7 +78,7 @@ namespace BDArmory.Control
         float health = 1f; // Airframe integrity at the last picture.
         readonly List<MissileBase> ownMissilesSeen = new List<MissileBase>();
 
-        bool PlanActive(MissileFire weaponManager) => engagementPlanner && TacticsAllowed(weaponManager);
+        bool PlanActive(MissileFire weaponManager) => engagementPlanner && Knows(SkillFeature.EngagementPlanner) && TacticsAllowed(weaponManager);
         bool PictureOf(Vessel v) => v != null && picture.target == v && Time.time - picture.time < 3f * pictureInterval;
 
         /// <summary>
@@ -117,8 +117,8 @@ namespace BDArmory.Control
                     if (p.target != target) { p.ourMaxRange = p.ourNoEscapeRange = p.theirNoEscapeRange = p.assistGain = 0f; zoneCycle = 0; }
                     p.target = target;
                     p.lead = PlanLead();
-                    CountMissiles(vessel, out p.ourLong, out p.ourShort);
-                    CountMissiles(target, out p.theirLong, out p.theirShort);
+                    CountMissiles(vessel, target, out p.ourLong, out p.ourShort);
+                    CountMissiles(target, vessel, out p.theirLong, out p.theirShort);
                     p.detectedByTarget = DetectedBy(weaponManager, target);
                     p.health = health = GameModes.AirframeIntegrity.Of(vessel);
                     TrackOwnMissiles(weaponManager, target, p);
@@ -159,12 +159,12 @@ namespace BDArmory.Control
             return Mathf.Clamp(Mathf.PI * (float)vessel.srfSpeed / available + 2f, 4f, 14f);
         }
 
-        static void CountMissiles(Vessel v, out int longRange, out int shortRange)
+        static void CountMissiles(Vessel v, Vessel against, out int longRange, out int shortRange)
         {
             longRange = shortRange = 0;
             foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(v))
             {
-                if (missile == null || missile.HasFired || !missile.engageAir) continue;
+                if (missile == null || missile.HasFired || !missile.engageAir || !MissileFire.GunsFirstAllows(v, missile, against)) continue;
                 if (missile.TargetingMode == MissileBase.TargetingModes.Heat) shortRange += RoundsAboard(missile);
                 else if (missile.TargetingMode == MissileBase.TargetingModes.Radar || missile.TargetingMode == MissileBase.TargetingModes.Inertial) longRange += RoundsAboard(missile);
             }
@@ -185,7 +185,7 @@ namespace BDArmory.Control
             pointedTypesSeen.Clear();
             foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(shooter))
             {
-                if (missile == null || missile.HasFired || !missile.engageAir || missile.part == null || missile.part.partInfo == null || !pointedTypesSeen.Add(missile.part.partInfo.name)) continue;
+                if (missile == null || missile.HasFired || !missile.engageAir || missile.part == null || missile.part.partInfo == null || !MissileFire.GunsFirstAllows(shooter, missile, target) || !pointedTypesSeen.Add(missile.part.partInfo.name)) continue;
                 float chance = ShotModel.EstimatePointed(missile, shooter, target, lead, out var features);
                 if (!best.valid || chance > bestChance) { bestChance = chance; best = features; bestPointedMissile = missile; }
             }
@@ -553,7 +553,12 @@ namespace BDArmory.Control
         /// </summary>
         bool AvoidMerge(Vessel v, float distance)
         {
-            if (ExtendingForNoMerge) return true;
+            if (ExtendingForNoMerge)
+            {
+                if (!RunDown(v, distance)) return true;
+                StopExtending("bandit's nose on us");
+                return false;
+            }
             var weaponManager = WeaponManager;
             if (!PlanActive(weaponManager) || !canExtend || !PictureOf(v) || picture.ourLong == 0) return false;
             var plan = PlanAgainst(v);
@@ -587,7 +592,12 @@ namespace BDArmory.Control
         /// </summary>
         bool Disengage(Vessel v, float distance)
         {
-            if (ExtendingToDisengage) return true;
+            if (ExtendingToDisengage)
+            {
+                if (!RunDown(v, distance)) return true;
+                StopExtending("bandit's nose on us");
+                return false;
+            }
             var weaponManager = WeaponManager;
             if (!PlanActive(weaponManager) || !canExtend || !PictureOf(v) || Time.time - lastDisengageTime < disengageCooldown) return false;
             float theirHealth = GameModes.AirframeIntegrity.Of(v);

@@ -6488,7 +6488,30 @@ namespace BDArmory.Control
         // extension for feature_engagementenvelope: new smartpickweapon method
         readonly List<MissileLauncher> radarPickCandidates = new List<MissileLauncher>(); // Usable radar missile types in the last air-target pick.
 
+        /// <summary>
+        /// While picking again with every weapon unusable, an overheated gun still counts against an air target: it stays selected while it
+        /// cools, so that the pilot keeps its nose on the lead point and fires again as soon as it can, rather than being left with no
+        /// weapon and turning away from a target in its gun window.
+        /// </summary>
+        bool allowCoolingGuns;
+
         bool SmartPickWeapon_EngagementEnvelope(TargetInfo target)
+        {
+            if (SmartPickWeaponFromReady(target)) return true;
+            if (!target || target.isMissile || target.Vessel == null || target.Vessel.LandedOrSplashed || !AnyGunCooling()) return false;
+            allowCoolingGuns = true;
+            try { return SmartPickWeaponFromReady(target); }
+            finally { allowCoolingGuns = false; }
+        }
+
+        bool AnyGunCooling()
+        {
+            foreach (var weapon in VesselModuleRegistry.GetModules<ModuleWeapon>(vessel))
+                if (weapon != null && weapon.isOverheated && weapon.GetWeaponClass() == WeaponClasses.Gun && weapon.engageAir) return true;
+            return false;
+        }
+
+        bool SmartPickWeaponFromReady(TargetInfo target)
         {
             // Part 1: Guard conditions (when not to pick a weapon)
             // ------
@@ -8137,9 +8160,23 @@ namespace BDArmory.Control
             }
         }
 
+        /// <summary>
+        /// Guns-first rule (BDArmorySettings.GUNS_FIRST): a missile may be used against a target only once the shooter's guns have hit it
+        /// (a hit or gun damage in the competition scores), and then only a heat-seeker. Always true with the rule off.
+        /// </summary>
+        public static bool GunsFirstAllows(Vessel shooter, MissileBase missile, Vessel target)
+        {
+            if (!BDArmorySettings.GUNS_FIRST || missile == null) return true;
+            if (missile.TargetingMode != MissileBase.TargetingModes.Heat || shooter == null || target == null) return false;
+            var scores = BDACompetitionMode.Instance != null ? BDACompetitionMode.Instance.Scores : null;
+            if (scores == null || !scores.ScoreData.TryGetValue(target.vesselName, out var victim)) return false;
+            return victim.hitCounts.ContainsKey(shooter.vesselName) || victim.damageFromGuns.ContainsKey(shooter.vesselName);
+        }
+
         // extension for feature_engagementenvelope: check engagement parameters of the weapon if it can be used against the current target
         bool CheckEngagementEnvelope(IBDWeapon weaponCandidate, float distanceToTarget, Vessel targetVessel)
         {
+            if (BDArmorySettings.GUNS_FIRST && weaponCandidate is MissileBase gatedMissile && !GunsFirstAllows(vessel, gatedMissile, targetVessel)) return false;
             EngageableWeapon engageableWeapon = weaponCandidate as EngageableWeapon;
 
             if (engageableWeapon == null) return true;
@@ -8206,7 +8243,7 @@ namespace BDArmory.Control
                     case WeaponClasses.Gun:
                         {
                             ModuleWeapon gun = (ModuleWeapon)weaponCandidate;
-                            if (gun.isOverheated) return false;
+                            if (gun.isOverheated && !allowCoolingGuns) return false;
                             if (gun.BurstFire && gun.RoundsRemaining > 0 && gun.RoundsRemaining < gun.RoundsPerMag)
                             {
                                 if (CheckAmmo(gun))
@@ -8610,7 +8647,8 @@ namespace BDArmory.Control
         {
             if (!BDArmorySettings.REALISTIC_VISUAL_DETECTION || target == null) return guardRange;
             var visual = VisualSample(target, missile);
-            return visual.blocked ? 0f : Mathf.Min(guardRange, visual.range);
+            float lookout = AI is BDModulePilotAI pilot ? pilot.LookoutFactor : 1f; // Less skilled pilots keep a poorer lookout.
+            return visual.blocked ? 0f : Mathf.Min(guardRange, lookout * visual.range);
         }
         /// <summary>Visual range where no particular target is in question.</summary>
         public float NominalVisualRange => BDArmorySettings.REALISTIC_VISUAL_DETECTION ? Mathf.Min(guardRange, VisualDetection.nominalRange) : guardRange;

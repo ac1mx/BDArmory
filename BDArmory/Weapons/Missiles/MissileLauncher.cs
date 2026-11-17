@@ -336,6 +336,8 @@ namespace BDArmory.Weapons.Missiles
         public float proximityFuzeInhibitionAlt = -1;
 
         float currentThrust;
+        /// <summary>Motor thrust being applied now (kN): zero before ignition and after burn-out.</summary>
+        public float ThrustNow => currentThrust * Throttle * motorThrottle;
 
         public bool deployed;
         //public float deployedTime;

@@ -24,8 +24,10 @@ param(
     [string]$GunneryCraft = "", # Only pilots of craft whose name contains this word use the gun employment range, flight-path lift measure, clean drag fit and planner speed floor.
     [string]$AltitudeCraft = "", # Only pilots of craft whose name contains this word climb for height over the target before missile shots.
     [string]$ControlCraft = "", # Only pilots of craft whose name contains this word fly the reworked steering control (adaptive model, governor, aim-rate damping).
+    [string]$DogfightCraft = "", # Only pilots of craft whose name contains this word fly the hard deck, roll-don't-push, slow-speed recovery and fight-flow choice ("none": no craft).
     [string]$CommitCraft = "", # Only pilots of craft whose name contains this word hold their engagement geometry and fly every missile break they decide on.
     [switch]$Sample, # BDAPerf's sampling profiler with load/spawn stacks.
+    [int]$RoundSeconds = 0, # Fair rounds end as draws after this long (both craft removed and respawned): with -Sample, a spawn/removal stall benchmark.
     [string]$PartPhoto = "", # Part names, comma-separated: close-ups of them on the craft every 30 s (ui_part_*.png in the run folder's ui).
     [int]$UiCapture = 0, # Seconds between screenshots of the interface (GameData/BDArmory/Logs/ui_*.png, moved to the run folder); 0: none.
     [int]$StopAfterShots = 0, # Stop once this many shot results are logged (per word in -ArmWords, when given) instead of flying out -Duration.
@@ -76,6 +78,7 @@ if ($PartPhoto) { $flags += "$pluginData\part_photo.on" }
 if ($AltitudeCraft) { $flags += "$pluginData\test_altitude.on" }
 if ($ControlCraft) { $flags += "$pluginData\test_control.on" }
 if ($CommitCraft) { $flags += "$pluginData\test_commit.on" }
+if ($DogfightCraft) { $flags += "$pluginData\test_dogfight.on" }
 $variantPatch = "$Ksp\GameData\Custom\Patches\zzFightVariants.cfg"
 Add-HarnessCleanup ($flags + $variantPatch)
 foreach ($f in $flags) { Set-Content $f "" }
@@ -84,10 +87,12 @@ if ($AdvancedCraft) { Set-Content "$pluginData\test_advanced_missiles.on" $Advan
 if ($AwarenessCraft) { Set-Content "$pluginData\test_pilot_awareness.on" $AwarenessCraft }
 if ($GunneryCraft) { Set-Content "$pluginData\test_gunnery.on" $GunneryCraft }
 if ($UiCapture -gt 0) { Set-Content "$pluginData\ui_capture.on" "$UiCapture" }
+if ($RoundSeconds -gt 0 -and -not $NoFairRounds) { Set-Content "$pluginData\duel_rounds.on" "$RoundSeconds" }
 if ($PartPhoto) { Set-Content "$pluginData\part_photo.on" $PartPhoto }
 if ($AltitudeCraft) { Set-Content "$pluginData\test_altitude.on" $AltitudeCraft }
 if ($ControlCraft) { Set-Content "$pluginData\test_control.on" $ControlCraft }
 if ($CommitCraft) { Set-Content "$pluginData\test_commit.on" $CommitCraft }
+if ($DogfightCraft) { Set-Content "$pluginData\test_dogfight.on" $DogfightCraft }
 if ($PatchFile) { Copy-Item $PatchFile $variantPatch -Force }
 if ($ShotModel) { Copy-Item $ShotModel "$pluginData\shot_model.cfg" -Force } # Backed up (or marked for removal) with the other game files.
 try {

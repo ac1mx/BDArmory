@@ -73,6 +73,10 @@ namespace BDArmory.Settings
         [BDAPersistentSettingsField] public static bool BULLET_DECALS = true;
         [BDAPersistentSettingsField] public static bool GAPLESS_PARTICLE_EMITTERS = true;         // Use gapless particle emitters.
         public static bool GaplessParticleEmitters => PERFORMANCE_OPTIONS && GAPLESS_PARTICLE_EMITTERS;
+        [BDAPersistentSettingsField] public static bool GUNS_FIRST = false;                       // Guns only until a craft has landed a gun hit on its target; then heat-seeking missiles too (to finish it), never radar ones.
+        [BDAPersistentSettingsField] public static bool TRAILS_MISSILE = true;                    // Long smoke trails behind burning missile motors (GPU).
+        [BDAPersistentSettingsField] public static bool TRAILS_CONTRAIL = true;                   // Condensation trails behind jet engines in cold air (GPU).
+        [BDAPersistentSettingsField] public static bool TRAILS_WINGTIP = true;                    // Wingtip vortices on aircraft pulling hard in dense air (GPU).
         [BDAPersistentSettingsField] public static bool FLARE_SMOKE = true;                       // Flares leave a trail of smoke.
         public static bool FlareSmoke => PERFORMANCE_OPTIONS && FLARE_SMOKE;
         [BDAPersistentSettingsField] public static bool DISABLE_RAMMING = false;                  // Prevent craft from going into ramming mode when out of ammo.

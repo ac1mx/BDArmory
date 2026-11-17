@@ -20,7 +20,7 @@ namespace BDArmory.Control
     public partial class BDModulePilotAI
     {
         bool TacticsAllowed(MissileFire weaponManager) =>
-            advancedTactics && pilotSkill > 25f && weaponManager != null && weaponManager.guardMode && !AutoTune && !belowMinAltitude && !ramming && !IsRunningWaypoints
+            advancedTactics && Knows(SkillFeature.Tactics) && weaponManager != null && weaponManager.guardMode && !AutoTune && !belowMinAltitude && !ramming && !IsRunningWaypoints
             && !vessel.LandedOrSplashed && !vessel.InNearVacuum();
 
         #region Energy
@@ -175,7 +175,7 @@ namespace BDArmory.Control
                 var weaponManager = WeaponManager;
                 if (weaponManager != null && (weaponManager.salvoDecisions || preemptiveFlareSalvos < maxPreemptiveFlareSalvos) && weaponManager.FirePreemptiveFlares()) // The pass is where a heat-seeker gets its tail shot.
                     ++preemptiveFlareSalvos;
-                if (vessel.srfSpeed > 0.85f * v.srfSpeed) return false; // No radius advantage: take the two-circle fight.
+                if (NewDogfight && Knows(SkillFeature.FightChoice) ? ChooseFlow(v) != FightFlow.OneCircle : vessel.srfSpeed > 0.85f * v.srfSpeed) return false; // No radius advantage: take the two-circle fight.
                 mergeTurnSide = Vector3.Dot(vectorToTarget, vesselTransform.right) >= 0 ? -1f : 1f; // Away from the side it passed on.
                 mergeTurnTimer = 0;
             }
@@ -236,6 +236,7 @@ namespace BDArmory.Control
             var weaponManager = WeaponManager;
             if (!TacticsAllowed(weaponManager) || v.LandedOrSplashed) return false;
             if (weaponManager.missileIsIncoming) { ++heightGateTicks[0]; return false; }
+            if (NewDogfight && weaponManager.CurrentMissile == null && distanceToTarget < 15000f) { ++heightGateTicks[5]; return false; } // Guns: close the gap, height for missile reach is no use.
             if (distanceToTarget < Mathf.Max(8000f, 3f * GunEmploymentRange(weaponManager))) { ++heightGateTicks[1]; return false; }
             bool havePicture = PlanActive(weaponManager) && PictureOf(v);
             if (havePicture && (picture.theirShot >= loftPressure || picture.theirInescapable)) { ++heightGateTicks[2]; return false; } // Its shot first: defend, don't climb.
@@ -407,7 +408,7 @@ namespace BDArmory.Control
 
         #region Commitment
         /// <summary>Decisions are held for a sensible time once made: on for pilots flying the advanced tactics above rookie level.</summary>
-        bool Committed => advancedTactics && pilotSkill > 25f;
+        bool Committed => advancedTactics && Knows(SkillFeature.Tactics);
         const float committedEvasionTime = 2f; // s
         const float missileEvadeHoldFactor = 1.3f; // Of the evade threshold, while already evading.
         const float committedTargetBias = 1.5f;

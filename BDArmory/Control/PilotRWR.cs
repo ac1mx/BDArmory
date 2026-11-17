@@ -29,7 +29,7 @@ namespace BDArmory.Control
             return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path).Trim() : null;
         }
         public static bool NewAwarenessFor(Vessel v) => string.IsNullOrEmpty(awarenessTestCraft) || (v != null && v.vesselName.Contains(awarenessTestCraft));
-        bool NewAwareness => NewAwarenessFor(vessel);
+        bool NewAwareness => NewAwarenessFor(vessel) && Knows(SkillFeature.Awareness);
 
         static RadarWarningReceiver ReceiverOf(MissileFire weaponManager) =>
             weaponManager != null && weaponManager.rwr != null && weaponManager.rwr.rwrEnabled ? weaponManager.rwr : null;

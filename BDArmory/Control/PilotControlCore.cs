@@ -316,6 +316,11 @@ namespace BDArmory.Control
         const float huntingRate = 4f, calmRate = 2f; // Reversals per second: 4/s is a 2 Hz oscillation.
         const float cutRate = 1.5f, recoverRate = 0.02f; // Per second: how fast a band's gain falls while hunting and rises again while calm.
         const float minGain = 0.15f;
+        // A stick swing the airframe doesn't follow is dither, not hunting: in dogfight flights a third of the reversals came with less
+        // than 0.02 rad/s of body-rate change (the lead point's noise times the aiming gain), and counting them held the pitch gain at
+        // 0.2–0.5 while tracking a gun shot. Counted only when the body rate on the axis swung by this much since the last reversal.
+        const float minRateSwing = 0.02f; // rad/s
+        float rateLow = float.MaxValue, rateHigh = float.MinValue;
         // The loop can also flip the stick every physics tick, with too small a swing for the reversal count: the F-15Z2 at q 180 kPa
         // alternates ±0.03 at 25 Hz (its damping gain times its control power is more than one 0.02 s tick can follow). Tick-to-tick
         // reversals of the stick's change: 12/s flags 70–80% of its flight above 120 kPa and 2% below 30 kPa.
@@ -347,10 +352,12 @@ namespace BDArmory.Control
             w = Math.Min(1f, (dynPres - knots[i]) / (knots[i + 1] - knots[i]));
         }
 
-        /// <summary>Feed the stick actually applied this tick.</summary>
-        public void Observe(float stick, float dynPres, float dt)
+        /// <summary>Feed the stick actually applied this tick and the body rate (rad/s) on the axis.</summary>
+        public void Observe(float stick, float rate, float dynPres, float dt)
         {
             if (!started) { extreme = previousExtreme = lastStick = stick; started = true; }
+            if (rate < rateLow) rateLow = rate;
+            if (rate > rateHigh) rateHigh = rate;
             ReversalRate *= (float)Math.Exp(-dt / memory);
             FlipRate *= (float)Math.Exp(-dt / flipMemory);
             float step = stick - lastStick;
@@ -367,7 +374,8 @@ namespace BDArmory.Control
             else if (direction > 0 ? stick > extreme : stick < extreme) extreme = stick; // Still moving the same way.
             else if (Math.Abs(stick - extreme) > hysteresis) // Turned back.
             {
-                if (Math.Abs(extreme - previousExtreme) >= minSwing) ReversalRate += 1f / memory;
+                if (Math.Abs(extreme - previousExtreme) >= minSwing && rateHigh - rateLow >= minRateSwing) ReversalRate += 1f / memory;
+                rateLow = float.MaxValue; rateHigh = float.MinValue;
                 direction = -direction;
                 previousExtreme = extreme;
                 extreme = stick;

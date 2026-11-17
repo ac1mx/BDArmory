@@ -26,26 +26,36 @@ namespace BDArmory.Testing
             next = Time.realtimeSinceStartup + 60f;
         }
 
+        bool capturing;
+
         void Update()
         {
             var vessel = FlightGlobals.ActiveVessel;
-            if (vessel == null) return;
-            BDArmorySetup.windowBDAToolBarEnabled = true;
-            BDArmoryAIGUI.windowBDAAIGUIEnabled = true;
-            foreach (var rwr in VesselModuleRegistry.GetModules<RadarWarningReceiver>(vessel)) if (rwr != null) rwr.displayRWR = true;
-            // Every third shot also shows the settings window and the vessel switcher (skin coverage), closed again for the others.
-            bool extra = count % 3 == 2;
-            BDArmorySetup.windowSettingsEnabled = extra;
-            if (LoadedVesselSwitcher.Instance != null && BDArmorySetup.showVesselSwitcherGUI != extra) LoadedVesselSwitcher.Instance.SetVisible(extra);
-            if (Time.realtimeSinceStartup < next) return;
+            if (vessel == null || capturing || Time.realtimeSinceStartup < next) return;
             next = Time.realtimeSinceStartup + interval;
             string path = Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/Logs", $"ui_{++count:000}.png");
-            StartCoroutine(Capture(path, vessel.vesselName));
+            StartCoroutine(Capture(path, vessel));
         }
 
-        System.Collections.IEnumerator Capture(string path, string vesselName)
+        /// <summary>
+        /// Opens the windows for the shot only (a frame to lay out, the frame drawn), then puts them back as the player had them, so
+        /// that they can still be closed while a run is watched.
+        /// </summary>
+        System.Collections.IEnumerator Capture(string path, Vessel vessel)
         {
+            capturing = true;
+            bool toolbar = BDArmorySetup.windowBDAToolBarEnabled, ai = BDArmoryAIGUI.windowBDAAIGUIEnabled, settings = BDArmorySetup.windowSettingsEnabled;
+            bool switcher = BDArmorySetup.showVesselSwitcherGUI;
+            var rwrs = new System.Collections.Generic.List<(RadarWarningReceiver rwr, bool shown)>();
+            foreach (var rwr in VesselModuleRegistry.GetModules<RadarWarningReceiver>(vessel)) if (rwr != null) { rwrs.Add((rwr, rwr.displayRWR)); rwr.displayRWR = true; }
+            BDArmorySetup.windowBDAToolBarEnabled = true;
+            BDArmoryAIGUI.windowBDAAIGUIEnabled = true;
+            bool extra = count % 3 == 0; // Every third shot also shows the settings window and the vessel switcher (skin coverage).
+            BDArmorySetup.windowSettingsEnabled = extra || settings;
+            if (extra && LoadedVesselSwitcher.Instance != null && !switcher) LoadedVesselSwitcher.Instance.SetVisible(true);
+            yield return null;
             yield return new WaitForEndOfFrame(); // After the interface has been drawn.
+            string vesselName = vessel != null ? vessel.vesselName : "";
             int width = Screen.width, height = Screen.height;
             var shot = new Texture2D(width, height, TextureFormat.RGB24, false);
             shot.ReadPixels(new Rect(0, 0, width, height), 0, 0, false);
@@ -54,6 +64,12 @@ namespace BDArmory.Testing
             path = Path.ChangeExtension(path, ".bmp"); // Written on a worker thread: no encoding on the main thread (run_fight converts to PNG).
             System.Threading.ThreadPool.QueueUserWorkItem(_ => WriteBmp(path, rgb, width, height));
             Debug.Log($"[BDArmory.UiCapture]: {path} ({vesselName})");
+            BDArmorySetup.windowBDAToolBarEnabled = toolbar;
+            BDArmoryAIGUI.windowBDAAIGUIEnabled = ai;
+            BDArmorySetup.windowSettingsEnabled = settings;
+            if (LoadedVesselSwitcher.Instance != null && BDArmorySetup.showVesselSwitcherGUI != switcher) LoadedVesselSwitcher.Instance.SetVisible(switcher);
+            foreach (var (rwr, shown) in rwrs) if (rwr != null) rwr.displayRWR = shown;
+            capturing = false;
         }
 
         internal static void WriteBmp(string path, byte[] rgb, int width, int height)

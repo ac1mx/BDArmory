@@ -2306,7 +2306,7 @@ namespace BDArmory.Control
             var weaponManager = WeaponManager;
             if (weaponManager != null)
             {
-                bool evadeMissile = weaponManager.incomingMissileTime <= weaponManager.evadeThreshold;
+                bool evadeMissile = weaponManager.incomingMissileTime <= weaponManager.evadeThreshold && MissileNoticed(weaponManager.incomingMissileVessel);
                 // Once evading a missile, keep evading it for a moment even if its predicted arrival drifts back over the threshold,
                 // instead of flipping between the break and the attack several times a second.
                 if (evadeMissile) missileEvadeHoldUntil = Time.time + committedEvasionTime;
@@ -2328,7 +2328,7 @@ namespace BDArmory.Control
                     minimumEvasionTime = 0f; //  Trying to evade missile threats when they don't exist will result in NREs
                     incomingMissileVessel = weaponManager.incomingMissileVessel;
                 }
-                else if (weaponManager.underFire && !ramming) // If we're ramming, ignore gunfire.
+                else if (weaponManager.underFire && !ramming && !GunThreatFoughtInBFM(weaponManager)) // If we're ramming, ignore gunfire.
                 {
                     if (weaponManager.incomingMissTime >= evasionTimeThreshold && weaponManager.incomingThreatDistanceSqr >= evasionMinRangeThreshold * evasionMinRangeThreshold) // If we haven't been under fire long enough or they're too close, ignore gunfire
                     {
@@ -2956,7 +2956,7 @@ namespace BDArmory.Control
                 }
             }
 
-            if (regainEnergy && angleToTarget > 30f)
+            if (regainEnergy && angleToTarget > (NewDogfight && vessel.srfSpeed < minSpeed ? 5f : 30f))
             {
                 RegainEnergy(s, target - vesselPos);
                 return;
@@ -3475,6 +3475,7 @@ namespace BDArmory.Control
             rollIntegral = 0.1f * SteerCorrection(Axis.Roll) * Mathf.Clamp(rollIntegral + rollError * Time.fixedDeltaTime, -1f, 1f);
 
             var steerPitch = pitchProportional + pitchIntegral - pitchDamping;
+            steerPitch = LimitPush(steerPitch, pitchError, rollError);
             var steerYaw = yawProportional + yawIntegral - yawDamping;
             var steerRoll = rollProportional + rollIntegral - rollDamping;
             #endregion
@@ -3514,6 +3515,8 @@ namespace BDArmory.Control
                 steerYaw *= controlCore.yawGovernor.Gain(governedPres);
                 steerRoll *= controlCore.rollGovernor.Gain(governedPres);
             }
+            steerPitch += GunTrackingTrim(pitchError, yawError, pitchProportional * dynamicAdjustment, yawProportional * dynamicAdjustment, governed, governedPres, out float trimYaw);
+            steerYaw += trimYaw;
 
             recordedPitchTerms = new Vector4(pitchProportional * dynamicAdjustment, pitchIntegral * dynamicAdjustment, -pitchDamping * dynamicAdjustment, steerPitch);
             recordedGovernor = governed ? new Vector3(controlCore.pitchGovernor.Gain(governedPres), controlCore.yawGovernor.Gain(governedPres), controlCore.rollGovernor.Gain(governedPres)) : Vector3.one;
@@ -3524,9 +3527,10 @@ namespace BDArmory.Control
             recordedAppliedPitch = appliedPitch;
             if (governed)
             {
-                controlCore.pitchGovernor.Observe(appliedPitch, governedPres, Time.fixedDeltaTime);
-                controlCore.yawGovernor.Observe(appliedYaw, governedPres, Time.fixedDeltaTime);
-                controlCore.rollGovernor.Observe(appliedRoll, governedPres, Time.fixedDeltaTime);
+                Vector3 bodyRate = vessel.angularVelocity;
+                controlCore.pitchGovernor.Observe(appliedPitch, bodyRate.x, governedPres, Time.fixedDeltaTime);
+                controlCore.yawGovernor.Observe(appliedYaw, bodyRate.z, governedPres, Time.fixedDeltaTime);
+                controlCore.rollGovernor.Observe(appliedRoll, bodyRate.y, governedPres, Time.fixedDeltaTime);
             }
 
             if (AutoTune)
@@ -3780,7 +3784,10 @@ namespace BDArmory.Control
         // stationary craft against one that is already up to speed.
         static readonly bool duelRoundsEnabled = steeringMetricsEnabled && System.IO.File.Exists(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/duel_rounds.on"));
         static int duelRoundSerial, duelDrawnRound = -1;
-        const float duelRoundLimit = 420f; // s: a round still undecided by then is a draw, and both craft are removed to respawn.
+        // s: a round still undecided by then is a draw, and both craft are removed to respawn. A number in duel_rounds.on replaces it
+        // (short rounds: a spawn and removal benchmark).
+        static readonly float duelRoundLimit = duelRoundsEnabled && float.TryParse(System.IO.File.ReadAllText(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/duel_rounds.on")).Trim(),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float limit) && limit > 0f ? limit : 420f;
         int duelRoundAtSpawn = -1;
         // Missile duels: with duel_bvr.on as well, a round is drawn once neither craft has had an air-to-air missile left to fire for
         // duelMissilesSpentDelay (time for the last ones to arrive): the gun fight that would follow says nothing about missile tactics.
@@ -4448,7 +4455,7 @@ namespace BDArmory.Control
                 AdjustThrottle(targetSpeed, false, useAB);
             }
 
-            Vessel missileThreat = weaponManager.missileIsIncoming ? weaponManager.incomingMissileVessel : null;
+            Vessel missileThreat = weaponManager.missileIsIncoming && MissileNoticed(weaponManager.incomingMissileVessel) ? weaponManager.incomingMissileVessel : null;
             MissileBase missileThreatMB;
             float closingTime;
             string kinematicEvasionStatus = "";
@@ -5108,7 +5115,7 @@ namespace BDArmory.Control
             Vector3 futurePos = AIUtils.PredictPosition(currentPos, futureVel, futureAccel, timeToImpact);
 
             // With the advanced tactics, fly the missile itself against the option (all but the notch, which works on its seeker).
-            if (advancedTactics && missileFlyoutEvasion && state != KinematicEvasionStates.Notch && FlyoutMissSqr(state, breakDirection, breakSpeed, currentAccel, out float flyoutDistSqr, out breakTime))
+            if (advancedTactics && missileFlyoutEvasion && Knows(SkillFeature.FlyoutEvasion) && state != KinematicEvasionStates.Notch && FlyoutMissSqr(state, breakDirection, breakSpeed, currentAccel, out float flyoutDistSqr, out breakTime))
             {
                 if (state == KinematicEvasionStates.TurnAway) finalBreakDirection = GetTerrainSurfacePosition(futurePos) + minAltitude * upDirection - currentPos; // Down to the deck as we go.
                 return flyoutDistSqr;
@@ -5147,7 +5154,7 @@ namespace BDArmory.Control
         /// The kinematic missile evasion (crank, notch, turn away or notch and dive, whichever is the least that makes the missile miss)
         /// is used when its own option is on or when the advanced tactics are, by any pilot above rookie.
         /// </summary>
-        bool UseKinematicEvasion => (evasionMissileKinematic || advancedTactics) && pilotSkill > 25f;
+        bool UseKinematicEvasion => (evasionMissileKinematic || advancedTactics) && Knows(SkillFeature.Tactics);
         Vessel evasionBreakMissile;
         float evasionBreakSide;
 

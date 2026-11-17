@@ -28,8 +28,10 @@ namespace BDArmory.Control
         const float bfmRange = 5000f; // m: opponents closer than this are fought with the planner.
         const float bfmHorizon = 4f, bfmStep = 0.2f, bfmReplanInterval = 0.25f;
         const int bfmSteps = (int)(bfmHorizon / bfmStep);
+        int bfmStepsNow = bfmSteps, bfmHypotheses = 2; // Steps flown forward and opponent predictions scored in this plan (pilot skill).
         const int bfmDirections = 12;
-        const float bfmSlowPenalty = 0.6f;
+        const float bfmSlowPenalty = 0.6f, bfmSeparationCost = 0.35f, bfmPullReward = 0.5f;
+        static readonly float bfmPullCos = Mathf.Cos(45f * Mathf.Deg2Rad); // The pull towards a gun shot is rewarded from 45° off.
         static readonly float[] bfmLoads = { 1f, 0.5f, 0.12f };
 
         #region Performance models
@@ -52,13 +54,14 @@ namespace BDArmory.Control
             public Vector3 lastVelocity, force; // Smoothed specific force (gravity removed), world frame.
             public bool have;
             public float maxNormal = 40f; // Recent best turning acceleration (m/s²).
+            public float liftPerQ; // Recent best turning acceleration per kPa of dynamic pressure (m/s² per kPa), 0 until seen above 3 kPa.
         }
         readonly OpponentTrack targetTrack = new OpponentTrack(), threatTrack = new OpponentTrack();
         readonly OpponentTrack ownTrack = new OpponentTrack(); // This craft, measured the same way, so that turn performance compares like with like.
 
         static void UpdateTrack(OpponentTrack track, Vessel v, Vector3 up, float gravity, float dt)
         {
-            if (v != track.vessel) { track.vessel = v; track.have = false; track.maxNormal = 40f; }
+            if (v != track.vessel) { track.vessel = v; track.have = false; track.maxNormal = 40f; track.liftPerQ = 0f; }
             if (v == null || v.LandedOrSplashed) { track.have = false; return; }
             Vector3 velocity = v.Velocity();
             if (track.have)
@@ -70,6 +73,8 @@ namespace BDArmory.Control
                 {
                     Vector3 normal = track.force - Vector3.Dot(track.force, velocity / speed) * (velocity / speed);
                     track.maxNormal = Mathf.Max(track.maxNormal * (1f - dt / 20f), normal.magnitude, 30f);
+                    float q = (float)v.dynamicPressurekPa;
+                    if (q > 3f) track.liftPerQ = Mathf.Max(track.liftPerQ * (1f - dt / 30f), normal.magnitude / q);
                 }
             }
             track.lastVelocity = velocity;
@@ -93,7 +98,8 @@ namespace BDArmory.Control
                 float mass = Mathf.Max((float)vessel.totalMass, 0.1f);
                 float thrustAccel = RecordedThrust() / mass * Mathf.Max(0f, Vector3.Dot(vesselTransform.up, along)); // Along the flight path.
                 float throttle = vessel.ctrlState.mainThrottle;
-                if (throttle > 0.95f)
+                bool lowAoA = Mathf.Abs(Vector3.Dot(along, vesselTransform.forward)) < 0.26f; // Within 15°.
+                if (throttle > 0.95f && (lowAoA || !NewDogfight))
                 {
                     fullThrustAccel = fullThrustMeasured ? Mathf.Lerp(fullThrustAccel, thrustAccel, dt / 2f) : thrustAccel;
                     fullThrustMeasured = true;
@@ -175,7 +181,7 @@ namespace BDArmory.Control
             Vector3 plane = normalMagnitude > 1f ? Vector3.Cross(dir, normal / normalMagnitude) : Vector3.zero;
             Vector3 pA = p, vA = vel, pB = p, vB = vel;
             posA[0] = posB[0] = p; velA[0] = velB[0] = vel;
-            for (int k = 1; k <= bfmSteps; ++k)
+            for (int k = 1; k <= bfmStepsNow; ++k)
             {
                 float sA = Mathf.Max(vA.magnitude, 1f);
                 Vector3 dA = vA / sA;
@@ -196,7 +202,7 @@ namespace BDArmory.Control
         }
 
         // Scoring context for one planning pass.
-        float bfmGunRange, bfmGunCos, bfmOptimalRange, bfmRangeScale, bfmThreatGunRange, bfmGroundHeight, bfmStartAltitude;
+        float bfmGunRange, bfmGunCos, bfmOptimalRange, bfmRangeScale, bfmThreatGunRange = 1200f, bfmGroundHeight, bfmStartAltitude;
         Vector3 bfmStartPosition;
 
         /// <summary>
@@ -221,16 +227,18 @@ namespace BDArmory.Control
         float StepScore(Vector3 p, Vector3 v, int k, bool haveThreat)
         {
             float score = 0f;
-            for (int h = 0; h < 2; ++h)
+            for (int h = 0; h < bfmHypotheses; ++h)
             {
                 Vector3 pt = h == 0 ? bfmTargetA[k] : bfmTargetB[k], vt = h == 0 ? bfmTargetAVel[k] : bfmTargetBVel[k];
                 float advantage = Advantage(p, v, pt, vt, out float range, out float ourCos, out float theirCos);
                 float rangeError = (range - bfmOptimalRange) / bfmRangeScale;
                 float s = advantage * (0.4f + 0.6f * Mathf.Exp(-rangeError * rangeError));
                 if (ourCos > bfmGunCos && range < bfmGunRange) s += 1f * (ourCos - bfmGunCos) / (1f - bfmGunCos);           // Our weapon window.
+                else if (NewDogfight && ourCos > bfmPullCos && range < 1.5f * bfmGunRange) s += bfmPullReward * (ourCos - bfmPullCos) / (bfmGunCos - bfmPullCos); // Pulling the nose towards it.
                 if (theirCos > 0.978f && range < bfmThreatGunRange) s -= 1.2f * (theirCos - 0.978f) / 0.022f;              // Its gun window (12°).
                 if (range < 80f) s -= 2f;                                                                                    // Collision.
-                score += 0.5f * s;
+                if (NewDogfight && advantage > -0.25f) s -= bfmSeparationCost * Mathf.Clamp01((range - 1500f) / 2000f);       // Leaving a fight we aren't losing.
+                score += s / bfmHypotheses;
             }
             if (haveThreat)
             {
@@ -249,6 +257,7 @@ namespace BDArmory.Control
             float height = altitude - bfmGroundHeight;
             float speed = v.magnitude;
             float sink = -Vector3.Dot(v, upDirection);
+            score += HardDeckScore(height);
             if (height < minAltitude) score -= 3f + (minAltitude - height) / 100f;
             else if (sink > 0f)
             {
@@ -286,7 +295,7 @@ namespace BDArmory.Control
             float rollTime = rollAngle / Mathf.Max(0.7f * observedRollRate, 0.5f) + 0.15f;
             float total = 0f, weights = 0f;
             float switchTime = bfmSwitchStep * bfmStep, secondRollTime = 0f;
-            for (int k = 1; k <= bfmSteps; ++k)
+            for (int k = 1; k <= bfmStepsNow; ++k)
             {
                 float t = k * bfmStep;
                 float speed = Mathf.Max(v.magnitude, 1f);
@@ -329,7 +338,7 @@ namespace BDArmory.Control
                 Vector3 a = along * dir + normal * liftDir - bodyGravity * upDirection;
                 v += a * bfmStep;
                 p += v * bfmStep;
-                float w = k == bfmSteps ? 2f + (float)k / bfmSteps : (float)k / bfmSteps;
+                float w = k == bfmStepsNow ? 2f + (float)k / bfmStepsNow : (float)k / bfmStepsNow;
                 total += w * StepScore(p, v, k, haveThreat);
                 weights += w;
             }
@@ -338,15 +347,16 @@ namespace BDArmory.Control
             {
                 // A fighter that runs out of speed has run out of options: below a fighting speed (the craft's corner speed, or most of its
                 // best turn speed) every manoeuvre's end state counts the shortfall against it.
-                float fightSpeed = Mathf.Max(cornerSpeed, 0.6f * bestTurnSpeed, 1.5f * minSpeed);
+                float fightSpeed = !NewDogfight ? Mathf.Max(cornerSpeed, 0.6f * bestTurnSpeed, 1.5f * minSpeed)
+                    : Mathf.Max(1.5f * minSpeed, (FlowActive && passFlow == FightFlow.OneCircle ? 0.45f : 0.6f) * Mathf.Min(cornerSpeed, bestTurnSpeed));
                 float endSpeed = v.magnitude;
                 if (endSpeed < fightSpeed) score -= bfmSlowPenalty * (fightSpeed - endSpeed) / fightSpeed;
             }
             if (energyWeight > 0 && opponent != null)
             {
                 float ourEnergy = bfmStartAltitude + Vector3.Dot(p - bfmStartPosition, upDirection) + v.sqrMagnitude / (2f * bodyGravity);
-                Vector3 pt = bfmTargetA[bfmSteps];
-                float theirEnergy = (float)opponent.altitude + Vector3.Dot(pt - opponent.CoM, upDirection) + bfmTargetAVel[bfmSteps].sqrMagnitude / (2f * bodyGravity);
+                Vector3 pt = bfmTargetA[bfmStepsNow];
+                float theirEnergy = (float)opponent.altitude + Vector3.Dot(pt - opponent.CoM, upDirection) + bfmTargetAVel[bfmStepsNow].sqrMagnitude / (2f * bodyGravity);
                 score += energyWeight * Mathf.Clamp((ourEnergy - theirEnergy) / 3000f, -1f, 1f);
             }
             return score;
@@ -355,6 +365,8 @@ namespace BDArmory.Control
         void Replan(Vessel opponent, Vessel threat)
         {
             ++bfmReplans;
+            bfmStepsNow = Mathf.Clamp(Mathf.RoundToInt(PlanHorizon / bfmStep), bfmSwitchStep + 2, bfmSteps);
+            bfmHypotheses = Knows(SkillFeature.FightChoice) ? 2 : 1; // Only the better pilots expect the opponent to turn onto them.
             var weaponManager = WeaponManager;
             bfmStartPosition = vessel.CoM;
             bfmStartAltitude = (float)vessel.altitude;
@@ -389,7 +401,9 @@ namespace BDArmory.Control
             if (haveThreat) PredictOpponent(threatTrack, vessel.CoM, velocity, bfmThreatA, bfmThreatAVel, bfmThreatB, bfmThreatBVel);
             float distance = (opponent.CoM - vessel.CoM).magnitude;
             float energyWeight = Mathf.Lerp(0.1f, 0.3f, Mathf.InverseLerp(1000f, bfmRange, distance)) // Energy matters more with room to use it,
-                * FightStyleEnergyFactor(opponent); // and against a better turner.
+                * FightStyleEnergyFactor(opponent) // and against a better turner,
+                * FlowEnergyFactor // and in the fight flow chosen at the pass,
+                * EnergySpendFactor(opponent, distance); // and less once there is energy in hand to spend on getting behind it.
 
             // Where the lift points now, and how hard we're pulling.
             Vector3 currentLift = (-vesselTransform.forward).ProjectOnPlanePreNormalized(dir).normalized;
@@ -398,8 +412,9 @@ namespace BDArmory.Control
             if (e1.sqrMagnitude < 0.01f) e1 = currentLift;
             e1.Normalize();
             Vector3 e2 = Vector3.Cross(dir, e1);
-            float pilotLimit = Mathf.Lerp(0.6f, 1f, Mathf.InverseLerp(25f, 100f, pilotSkill)); // Less skilled pilots don't use the whole envelope.
+            float pilotLimit = EnvelopeShare; // Less skilled pilots don't use the whole envelope.
             SectionBFMContext(opponent, ref energyWeight);
+            NoteOvershootChance(opponent);
             for (int i = 0; i < bfmTopCandidates; ++i) bfmTop[i].score = float.MinValue;
 
             var best = new BFMPlan { score = float.MinValue };
@@ -431,6 +446,7 @@ namespace BDArmory.Control
                         if (label != null && !fullPower) break;
                         float load = bfmLoads[l] * pilotLimit;
                         float score = ScoreCandidate(lift, load, fullPower, currentLift, currentNormal, haveThreat, energyWeight, opponent);
+                        score += FlowBonus(lift) + OvershootBonus(lift, fullPower);
                         KeepTopCandidate(lift, load, fullPower, score);
                         score += HoldBonus(lift, load, fullPower, dir);
                         if (score > best.score)
@@ -449,7 +465,7 @@ namespace BDArmory.Control
                 for (var second = BFMSecond.Reverse; second <= BFMSecond.Chop; ++second)
                 {
                     float score = ScoreCandidate(candidate.lift, candidate.load, candidate.fullPower, currentLift, currentNormal, haveThreat, energyWeight, opponent, second, pilotLimit)
-                        + HoldBonus(candidate.lift, candidate.load, candidate.fullPower, dir);
+                        + FlowBonus(candidate.lift) + OvershootBonus(candidate.lift, candidate.fullPower) + HoldBonus(candidate.lift, candidate.load, candidate.fullPower, dir);
                     if (score > best.score)
                     {
                         best = new BFMPlan { valid = true, planeNormal = Vector3.Cross(dir, candidate.lift), load = candidate.load, fullPower = candidate.fullPower, score = score, label = null };
@@ -520,12 +536,14 @@ namespace BDArmory.Control
 
             if (IsExtending && extendTarget == opponent) StopExtending("manoeuvre planner");
             NoteCrossing(opponent);
+            NotePass(opponent);
+            if (opponent == targetVessel && FlyManoeuvre(s, opponent)) { ++bfmTicks; return true; }
             if (!bfmPlan.valid || Time.time >= bfmNextPlanTime)
             {
                 long start = System.Diagnostics.Stopwatch.GetTimestamp();
                 Replan(opponent, threat);
                 bfmPlanTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
-                bfmNextPlanTime = Time.time + bfmReplanInterval * (0.9f + 0.2f * ((vessel.id.GetHashCode() & 7) / 7f)); // Spread the work between craft.
+                bfmNextPlanTime = Time.time + ReplanInterval * (0.9f + 0.2f * ((vessel.id.GetHashCode() & 7) / 7f)); // Spread the work between craft.
             }
             if (!bfmPlan.valid) return false;
             ++bfmTicks;
@@ -558,7 +576,7 @@ namespace BDArmory.Control
         #region Scissors and bugout
         // A scissors is a series of overshoots: each time the flight paths cross, the opponent changes sides of our nose. Crossings are
         // counted within crossingRange when the paths are neither head-on nor parallel.
-        const float crossingRange = 1500f, scissorsWindow = 15f, bugoutCooldown = 30f, bugoutScore = -0.15f;
+        const float crossingRange = 1500f, scissorsWindow = 15f, bugoutCooldown = 30f, bugoutScore = -0.15f, bugoutEnergyLimit = 300f;
         readonly System.Collections.Generic.List<float> crossingTimes = new System.Collections.Generic.List<float>();
         float lastCrossingSide, bfmScoreTrend, lastBugoutTime = -100f;
         Vessel crossingOpponent;
@@ -591,10 +609,17 @@ namespace BDArmory.Control
         /// </summary>
         bool Bugout(Vessel v, float distance)
         {
-            if (IsExtending && extendingReason == bugoutReason) return true;
+            if (IsExtending && extendingReason == bugoutReason)
+            {
+                if (!RunDown(v, distance)) return true;
+                StopExtending("bandit's nose on us");
+                return false;
+            }
             if (!PlanActive(WeaponManager) || !canExtend || Time.time - lastBugoutTime < bugoutCooldown) return false;
             if (!InScissors || bfmScoreTrend > bugoutScore || !TurnedAway(v, 60f)) return false;
+            if (NewDogfight && EnergyAdvantage(v) > bugoutEnergyLimit) return false; // Energy in hand is for going over the top of it, not for leaving.
             if (EnergyAdvantage(v) < -300f || vessel.srfSpeed < 0.9f * v.srfSpeed) return false; // It would run us down.
+            if (!CanRunFrom(v, distance)) return false; // Its nose would be back on us inside its gun range.
             lastBugoutTime = Time.time;
             ++bfmBugouts;
             if (steeringMetricsEnabled) Debug.Log($"[BDArmory.BDModulePilotAI]: Planner {vessel.vesselName}: bugout from {v.vesselName} at {distance:F0}m (score {bfmScoreTrend:F2}, energy {EnergyAdvantage(v):F0}m)");
@@ -603,9 +628,9 @@ namespace BDArmory.Control
         }
 
         string BFMMetrics() => string.Format(System.Globalization.CultureInfo.InvariantCulture,
-            "bfmSecond=reverse {0}/pursue {1}/extend {2}/chop {3} crossings={4} scissors={5:F1}s bugouts={6} bfmPlanCost={7:F0}us/replan",
+            "bfmSecond=reverse {0}/pursue {1}/extend {2}/chop {3} crossings={4} scissors={5:F1}s bugouts={6} bfmPlanCost={7:F0}us/replan {8}",
             bfmSecondPlans[1], bfmSecondPlans[2], bfmSecondPlans[3], bfmSecondPlans[4], bfmCrossings, scissorsTicks * Time.fixedDeltaTime, bfmBugouts,
-            bfmReplans > 0 ? bfmPlanTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / bfmReplans : 0);
+            bfmReplans > 0 ? bfmPlanTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / bfmReplans : 0, DogfightMetrics());
         #endregion
 
         /// <summary>Angle off the nose (°) inside which the normal aiming takes over a missile shot: the weapon manager's boresight share, at most 25°.</summary>

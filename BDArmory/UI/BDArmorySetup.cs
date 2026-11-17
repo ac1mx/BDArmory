@@ -2581,6 +2581,12 @@ namespace BDArmory.UI
                     if (ExplosionFx.explosionFXPools != null) ExplosionFx.explosionFXPools.Clear();
                     if (NukeFX.nukePool != null) NukeFX.nukePool.Clear();
                 }
+                if (BDArmorySettings.PERFORMANCE_OPTIONS)
+                {
+                    BDArmorySettings.TRAILS_MISSILE = GUI.Toggle(SLeftRect(++line, 1), BDArmorySettings.TRAILS_MISSILE, "Missile Smoke Trails");
+                    BDArmorySettings.TRAILS_CONTRAIL = GUI.Toggle(SRightRect(line, 1), BDArmorySettings.TRAILS_CONTRAIL, "Contrails");
+                    BDArmorySettings.TRAILS_WINGTIP = GUI.Toggle(SLeftRect(++line, 1), BDArmorySettings.TRAILS_WINGTIP, "Wingtip Vortices");
+                }
                 if (BDArmorySettings.ADVANCED_USER_SETTINGS && BDArmorySettings.PERFORMANCE_OPTIONS)
                 {
                     BDArmorySettings.GAPLESS_PARTICLE_EMITTERS = GUI.Toggle(SLeftRect(++line, 1), BDArmorySettings.GAPLESS_PARTICLE_EMITTERS, StringUtils.Localize("#LOC_BDArmory_Settings_GaplessParticleEmitters"));//"Gapless Particle Emitters"
@@ -3701,6 +3707,7 @@ namespace BDArmory.UI
                     BDArmorySettings.BATTLEDAMAGE = false;
                 }
                 BDArmorySettings.INFINITE_ORDINANCE = GUI.Toggle(SRightRect(line), BDArmorySettings.INFINITE_ORDINANCE, StringUtils.Localize("#LOC_BDArmory_Settings_InfiniteMissiles"));
+                BDArmorySettings.GUNS_FIRST = GUI.Toggle(SLeftRect(++line), BDArmorySettings.GUNS_FIRST, "Guns First (heat missiles after a gun hit)");
                 if (BDArmorySettings.BATTLEDAMAGE)
                 {
                     if (BDArmorySettings.BD_NO_DEBRIS != (BDArmorySettings.BD_NO_DEBRIS = GUI.Toggle(SLeftRect(++line), BDArmorySettings.BD_NO_DEBRIS, "Battle Damage Without Debris")) && BDArmorySettings.BD_NO_DEBRIS)

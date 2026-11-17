@@ -1587,6 +1587,7 @@ namespace BDArmory.UI
                                             AI.SkillLevel = skill;
                                     }
                                     tacLines += 1.25f;
+                                    GUI.Label(SettinglabelRect(tacLines++), AI.SkillSummary(), Label);
                                     if (HighLogic.LoadedSceneIsFlight)
                                     {
                                         foreach (var readout in AI.TacticsReadout())

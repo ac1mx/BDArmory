@@ -46,7 +46,7 @@ namespace BDArmory.Control
         int matchupStandoffTicks, matchupCompressTicks, matchupHoldRanges, matchupPlanChanges;
         float holdRangeSince = -100f;
 
-        bool MatchupActive(MissileFire weaponManager) => matchupTactics && PlanActive(weaponManager);
+        bool MatchupActive(MissileFire weaponManager) => matchupTactics && Knows(SkillFeature.Matchup) && PlanActive(weaponManager);
         FightPlan PlanAgainst(Vessel v) => MatchupActive(WeaponManager) && matchup.opponent == v && Time.time - matchup.time < 3f * matchupInterval ? matchup.plan : FightPlan.Neutral;
 
         /// <summary>Size up the target (every few seconds, from the engagement picture's first stage).</summary>

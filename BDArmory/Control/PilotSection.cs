@@ -48,7 +48,7 @@ namespace BDArmory.Control
         int sectionSandwichTicks, sectionDragTicks, sectionSplitTicks, sectionSupportTicks, sectionGrinderTicks, sectionBracketTicks, sectionSharedHolds;
         float sectionWingmanTime;
 
-        bool SectionActive(MissileFire weaponManager) => sectionTactics && TacticsAllowed(weaponManager);
+        bool SectionActive(MissileFire weaponManager) => sectionTactics && Knows(SkillFeature.SectionTactics) && TacticsAllowed(weaponManager);
         bool SectionFresh => Time.time - section.time < 3f * sectionInterval && section.wingman != null && section.wingman.loaded;
 
         /// <summary>Rebuild the section picture (twice a second).</summary>
@@ -202,7 +202,7 @@ namespace BDArmory.Control
             Vector3 fly = target - vessel.CoM;
             float floor = OrdersAltitude() - supportFloorDrop;
             float flyAltitude = (float)FlightGlobals.getAltitudeAtPos(target);
-            CountMissiles(vessel, out int longRange, out _);
+            CountMissiles(vessel, targetVessel, out int longRange, out _);
             if (flyAltitude < floor && longRange > 0) { target += (floor - flyAltitude) * upDirection; fly = target - vessel.CoM; changed = true; } // At any range while there are radar rounds to shoot down with.
             Vessel mate = distanceToTarget > 10000f ? WingmanForOrders() : null;
             if (mate != null && !mate.LandedOrSplashed && !(mate.ActiveController().AI is BDModulePilotAI mateAI && mateAI.OrdersRecovering))

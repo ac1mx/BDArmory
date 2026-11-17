@@ -587,22 +587,53 @@ namespace BDArmory.VesselSpawning
             if (BDArmorySettings.ASTEROID_FIELD && vessel.vesselType == VesselType.SpaceObject) return; // Don't remove asteroids we're using.
             StartCoroutine(RemoveVesselCoroutine(vessel));
         }
+        const float focusWaitLimit = 20f; // s to wait for another vessel to take the focus before killing the focussed one.
+
+        // Vessels with a removal under way. Two craft removed together (a drawn round) would otherwise hand the focus to each other in
+        // turn, the second handing it back to the first, which is then killed part by part as the focussed vessel.
+        static readonly HashSet<Vessel> beingRemoved = new HashSet<Vessel>();
+
+        /// <summary>Best vessel to hand the focus to: a craft still in the fight, then any other craft, a missile or debris last; never one being removed.</summary>
+        static Vessel FocusCandidate(Vessel leaving)
+        {
+            beingRemoved.RemoveWhere(v => v == null);
+            Vessel other = null;
+            int otherRank = -1;
+            foreach (var v in FlightGlobals.VesselsLoaded)
+            {
+                if (v == null || v == leaving || v.packed || v.vesselType == VesselType.SpaceObject || beingRemoved.Contains(v)) continue;
+                int rank = v.vesselType == VesselType.Debris || v.IsMissile() ? 0 : VesselModuleRegistry.GetMissileFire(v, true) != null && !GameModes.CleanDamage.IsShotDown(v) ? 2 : 1;
+                if (rank > otherRank) { other = v; otherRank = rank; }
+            }
+            return other;
+        }
+
         public IEnumerator RemoveVesselCoroutine(Vessel vessel)
         {
             if (vessel == null) yield break;
             removeVesselsPending = Math.Max(1, removeVesselsPending + 1);
+            beingRemoved.Add(vessel); // Pruned once destroyed (FocusCandidate).
             if (vessel == FlightGlobals.ActiveVessel && vessel.vesselType != VesselType.SpaceObject)
             {
                 // Killing the focussed vessel makes every part die on its own, decoupling each into a new vessel first (seconds of
                 // vessel creation for a fighter). Hand the focus to another loaded craft and recover this one whole instead.
                 // Prefer a craft still in the fight, then any other craft; a missile or debris only as a last resort.
-                Vessel other = null;
-                int otherRank = -1;
-                foreach (var v in FlightGlobals.VesselsLoaded)
+                Vessel other = FocusCandidate(vessel);
+                if (other == null && (ContinuousSpawning.Instance != null && ContinuousSpawning.Instance.vesselsSpawningContinuously))
                 {
-                    if (v == null || v == vessel || v.packed || v.vesselType == VesselType.SpaceObject) continue;
-                    int rank = v.vesselType == VesselType.Debris || v.IsMissile() ? 0 : VesselModuleRegistry.GetMissileFire(v, true) != null && !GameModes.CleanDamage.IsShotDown(v) ? 2 : 1;
-                    if (rank > otherRank) { other = v; otherRank = rank; }
+                    // Nothing else to look at yet, but the spawner is about to bring a craft in: wait for it (weapons held meanwhile)
+                    // rather than kill the focussed vessel, which breaks it apart into a new vessel per part (about a second of stall).
+                    // The spawner holds off while removals are pending: this one doesn't count as pending while it waits for it.
+                    var weaponManager = VesselModuleRegistry.GetMissileFire(vessel, true);
+                    if (weaponManager != null) weaponManager.guardMode = false;
+                    --removeVesselsPending;
+                    for (float waited = 0f; waited < focusWaitLimit && other == null && vessel != null; waited += Time.fixedDeltaTime)
+                    {
+                        yield return waitForFixedUpdate;
+                        other = FocusCandidate(vessel);
+                    }
+                    ++removeVesselsPending;
+                    if (vessel == null) { --removeVesselsPending; yield break; }
                 }
                 if (other != null)
                 {
@@ -640,6 +671,7 @@ namespace BDArmory.VesselSpawning
                     if ((Versioning.version_major == 1 && Versioning.version_minor > 10) || Versioning.version_major > 1) // Comets introduced in 1.11
                         RemoveComet_1_11(vessel);
                 }
+                if (vessel == FlightGlobals.ActiveVessel) Debug.Log($"[BDArmory.SpawnUtils]: Removing the focussed vessel {vessel.vesselName} part by part: no other vessel to switch to.");
                 vessel.Die(); // Kill the vessel
                 yield return waitForFixedUpdate;
                 if (vessel != null)

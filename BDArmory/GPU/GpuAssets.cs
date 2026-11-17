@@ -18,6 +18,7 @@ namespace BDArmory.GPU
         public static Shader Thermal;
         public static Shader RadarScope;
         public static Shader RcsInstanced;
+        public static Shader Trail;
 
         void Awake()
         {
@@ -44,6 +45,7 @@ namespace BDArmory.GPU
                     case "BDArmory/GPU/Thermal": Thermal = shader; break;
                     case "BDArmory/GPU/RadarScope": RadarScope = shader; break;
                     case "BDArmory/GPU/RcsInstanced": RcsInstanced = shader; break;
+                    case "BDArmory/GPU/Trail": Trail = shader; break;
                 }
             }
             bundle.Unload(false);

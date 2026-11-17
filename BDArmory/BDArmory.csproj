@@ -160,6 +160,9 @@
     <Compile Include="Control\ShotModel.cs" />
     <Compile Include="Control\MissileFlyout.cs" />
     <Compile Include="Control\PilotBFM.cs" />
+    <Compile Include="Control\PilotSkill.cs" />
+    <Compile Include="Control\PilotDogfight.cs" />
+    <Compile Include="Control\PilotManoeuvres.cs" />
     <Compile Include="Control\PilotGunnery.cs" />
     <Compile Include="Control\PilotMissileDefence.cs" />
     <Compile Include="Control\PilotEngagement.cs" />
