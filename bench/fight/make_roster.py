@@ -16,10 +16,14 @@ for entry in sys.argv[2:]:
         elif key == "swap": swaps = [pair.split(":") for pair in value.split(",")]
         else: sys.exit(f"unknown option {option}")
     with open(source, encoding="utf-8", newline="") as f: lines = f.read().split("\n")
-    part, disabled, swapped = "", 0, 0
+    part, disabled, swapped, naming = "", 0, 0, -1
     for i, line in enumerate(lines):
         s = line.strip()
         if i == 0 and s.startswith("ship = "): lines[i] = line[:line.index("ship = ")] + "ship = " + name + ("\r" if line.endswith("\r") else "")
+        # A part's VESSELNAMING block names the craft in flight over `ship =`: rename it too.
+        if s == "VESSELNAMING": naming = i
+        elif naming >= 0 and s.startswith("name = ") and i <= naming + 3:
+            lines[i] = line[:line.index("name = ")] + "name = " + name + ("\r" if line.endswith("\r") else ""); naming = -1
         if s.startswith("part = "): part = s[7:].rsplit("_", 1)[0]
         elif s.startswith("engageAir = True") and part in noair:
             lines[i] = line.replace("engageAir = True", "engageAir = False"); disabled += 1
