@@ -38,8 +38,10 @@ namespace BDArmory.Control
     {
         public enum Manoeuvre { None, BreakTurn, Reversal, HighYoYo, LowYoYo, FlatScissors, RollingScissors, Immelmann, SplitS, ThreatTurn, Unload, GunsJink, LagRoll, LagToControl, MergePlan }
         static readonly string[] manoeuvreNames = { "", "break turn", "turn reversal", "high yo-yo", "low yo-yo", "flat scissors", "rolling scissors", "Immelmann", "Split-S", "threat turn", "unload", "guns jink", "lag roll", "lag to control zone", "merge" };
-        static readonly float[] manoeuvreCooldowns = { 0f, 4f, 3f, 6f, 6f, 8f, 8f, 15f, 15f, 0f, 2f, 3f, 6f, 4f, 6f };
-        static readonly float[] manoeuvreLimits = { 0f, 5f, 3f, 6f, 6f, 15f, 15f, 14f, 14f, 30f, 4f, 4f, 5f, 4f, 6f }; // s at most (the threat turn is held round the circle).
+        // The guns jink only spoils a tracking solution: a couple of seconds, then the break turn works the angles and the closure into an
+        // overshoot (4 s on a 3 s cooldown had craft jinking most of the time with a bandit at their six, never getting back to neutral).
+        static readonly float[] manoeuvreCooldowns = { 0f, 4f, 3f, 6f, 6f, 8f, 8f, 15f, 15f, 0f, 2f, 7f, 6f, 4f, 6f };
+        static readonly float[] manoeuvreLimits = { 0f, 5f, 3f, 6f, 6f, 15f, 15f, 14f, 14f, 30f, 4f, 2.5f, 5f, 4f, 6f }; // s at most (the threat turn is held round the circle).
         // Veteran and above; the others from Trained.
         static readonly bool[] manoeuvreAdvanced = { false, false, false, false, false, false, true, true, true, false, false, true, true, false, true };
         static readonly bool[] manoeuvreDefensive = { false, true, true, false, false, false, false, false, true, true, true, true, false, false, false };
@@ -143,6 +145,8 @@ namespace BDArmory.Control
                         // to put the excess into height rather than drag. Held round the circle while it is still behind our wing line: out-
                         // rating it is how the defender gets back to neutral, and leaving the turn gives that away.
                         float slice = bp.speed < 0.95f * cornerSpeed ? 0.35f : bp.speed > 1.1f * cornerSpeed ? -0.15f : 0.1f;
+                        // Near the deck the slice would spiral the fight into the ground (each turn trading height for speed): level it off.
+                        if (bp.height < HardDeck + 1500f) slice = Mathf.Min(slice, Mathf.Lerp(-0.2f, slice, Mathf.InverseLerp(HardDeck, HardDeck + 1500f, bp.height)));
                         lift = (towards - slice * up).normalized;
                         fullPower = true;
                         done = !bp.itBehindOurWingline || bp.range > 3000f || bp.theirAta > 90f && bp.range > 1500f;
@@ -155,9 +159,14 @@ namespace BDArmory.Control
                     done = bp.theirAta < 20f || !bp.itBehindOurWingline || bp.speed > cornerSpeed; // Nose back on: pitch back, lift vector on (the threat turn or break takes over).
                     break;
                 case Manoeuvre.BreakTurn:
-                    lift = towards;
-                    fullPower = bp.speed < 1.2f * cornerSpeed; // Above the corner, shed speed to tighten the turn.
-                    done = bp.theirAta > 50f || !bp.itBehindOurWingline;
+                    {
+                        lift = towards;
+                        // Into it at max rate. Closing fast in close: idle and boards, so its closure carries it past our tail (the overshoot,
+                        // which the reversal then takes); otherwise above the corner shed speed to tighten the turn.
+                        bool forceOvershoot = bp.range < 900f && bp.closure > 30f; // closure: the rate the range is shrinking.
+                        fullPower = !forceOvershoot && bp.speed < 1.2f * cornerSpeed;
+                        done = bp.theirAta > 50f || !bp.itBehindOurWingline;
+                    }
                     break;
                 case Manoeuvre.Reversal:
                     lift = towards; // Pull for its six.
@@ -171,8 +180,10 @@ namespace BDArmory.Control
                         if (outOfPlane.sqrMagnitude < 1e-4f) outOfPlane = up;
                         float vertical = Vector3.Dot(outOfPlane.normalized, upDirection);
                         float sign = bp.height < HardDeck + 600f ? Mathf.Sign(vertical + 1e-3f) : jinkSign; // Low: only upwards.
-                        lift = (sign * outOfPlane.normalized + 0.3f * towards).normalized;
+                        // Still turning into it while jinking: out of its plane is what spoils the solution, into it is what builds the angles.
+                        lift = (sign * outOfPlane.normalized + 0.8f * towards).normalized;
                         done = bp.theirAta > 20f || bp.range > 1200f;
+                        if (!done && Time.time - manoeuvreStart > manoeuvreLimits[(int)Manoeuvre.GunsJink] - 0.1f) { Switch(Manoeuvre.BreakTurn); lift = towards; } // Then back to the break.
                     }
                     break;
                 case Manoeuvre.LagToControl:
@@ -410,7 +421,25 @@ namespace BDArmory.Control
         {
             if (!NewDogfight || !bfmPlanner || !TacticsAllowed(weaponManager) || targetVessel == null) return false;
             var shooter = weaponManager.incomingThreatVessel;
-            return shooter != null && shooter == targetVessel && (shooter.CoM - vessel.CoM).sqrMagnitude < bfmRange * bfmRange;
+            if (shooter == null || (shooter.CoM - vessel.CoM).sqrMagnitude > bfmRange * bfmRange) return false;
+            return shooter == targetVessel || (shooter.CoM - vessel.CoM).sqrMagnitude < secondBanditRange * secondBanditRange; // A second bandit close in: the planner defends against it.
+        }
+
+        const float secondBanditRange = 3000f, secondBanditNoseOn = 30f, secondBanditNoseOff = 50f; // 3 km: guns reach (and are fired) from 2.5 km.
+        int secondBanditDefences;
+
+        /// <summary>
+        /// A bandit other than our target behind our wing line, close in, with its flight path on us: defended against first. Held (with
+        /// a wider angle) while the defence against it runs, so the fight doesn't flip between the two bandits tick to tick.
+        /// </summary>
+        bool DefendAgainst(Vessel threat)
+        {
+            if (threat == null || threat.LandedOrSplashed || MissileFire.GoingDown(threat)) return false;
+            Vector3 toThreat = threat.CoM - vessel.CoM;
+            float range = toThreat.magnitude;
+            if (range > secondBanditRange || Vector3.Dot(toThreat, vessel.srf_vel_direction) > 0f) return false; // Far, or ahead of our wing line.
+            float theirAta = Vector3.Angle(threat.srf_vel_direction, -toThreat);
+            return theirAta < (manoeuvreOpponent == threat ? secondBanditNoseOff : secondBanditNoseOn);
         }
 
         void EndManoeuvre()
@@ -423,7 +452,7 @@ namespace BDArmory.Control
 
         string ManoeuvreMetrics()
         {
-            var sb = new System.Text.StringBuilder("manoeuvres=");
+            var sb = new System.Text.StringBuilder($"secondBanditDefence={secondBanditDefences * Time.fixedDeltaTime:F1}s manoeuvres=");
             for (int i = 1; i < manoeuvreKinds; ++i) sb.Append(i > 1 ? "/" : "").Append(manoeuvreNames[i].Replace(' ', '-')).Append(' ').Append(manoeuvreCounts[i]);
             return sb.ToString();
         }

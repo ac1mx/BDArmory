@@ -14,6 +14,7 @@ param(
     [switch]$NoFairRounds,
     [switch]$BvrOnly,
     [switch]$Teams,
+    [switch]$TeamRounds, # With -Teams: a craft that dies waits until its side is wiped out; then the survivors are removed and all respawn ("TeamRound N won by" lines). Implies -NoFairRounds.
     [switch]$Patrol, # Craft with nothing to fight patrol random points near the spawn point (use with a large -SpawnDistance).
     [switch]$FlightRecorder,
     [string]$PatchFile = "",  # ModuleManager patch placed in GameData for this run only.
@@ -64,7 +65,8 @@ Set-HarnessGameSettings $Ksp @{
 }
 if ($BdaSettings) { $extra = @{}; $BdaSettings -split ';' | Where-Object { $_ } | ForEach-Object { $k, $v = $_ -split '=', 2; $extra[$k.Trim()] = $v.Trim() }; Set-HarnessGameSettings $Ksp $extra }
 $flags = @("$pluginData\steering_metrics.on")
-if (-not $NoFairRounds) { $flags += "$pluginData\duel_rounds.on" }
+if (-not $NoFairRounds -and -not $TeamRounds) { $flags += "$pluginData\duel_rounds.on" }
+if ($TeamRounds) { $flags += "$pluginData\team_rounds.on" }
 if ($BvrOnly) { $flags += "$pluginData\duel_bvr.on" } # Rounds end as draws once both craft have spent their air-to-air missiles.
 if ($Teams) { $flags += "$pluginData\test_teams.on" }
 if ($Patrol) { $flags += "$pluginData\test_patrol.on" }

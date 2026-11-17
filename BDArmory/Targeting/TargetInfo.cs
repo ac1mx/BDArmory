@@ -171,7 +171,7 @@ namespace BDArmory.Targeting
                 }
                 else if (WeaponManager)
                 {
-                    return WeaponManager.vessel.isCommandable; //isn't debris / has command part
+                    return WeaponManager.vessel.isCommandable && !MissileFire.GoingDown(WeaponManager.vessel); //isn't debris / has command part, and isn't a crippled craft going down
                     //return weaponManager.vessel.IsControllable; //vessel has probecore & EC/pilot && pilot is conscious
                     //enable this if you want exceedingly honorable pilots who hold fire if their target has GLOC'ed themselves
                     // GLOC'ed craft now go neutral stick, so they no longer get locked in a perma-stun deathloop                    

@@ -167,7 +167,7 @@ namespace BDArmory.Control
         {
             float best = 0f;
             foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(shooter))
-                if (missile != null && !missile.HasFired && missile.engageAir)
+                if (missile != null && !missile.HasFired && missile.engageAir && MissileFire.GunsFirstAllows(shooter, missile, target))
                     best = Mathf.Max(best, MissileLaunchParams.GetDynamicLaunchParams(missile, target.Velocity(), target.CoM).maxLaunchRange);
             return best;
         }

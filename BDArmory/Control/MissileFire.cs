@@ -8168,15 +8168,54 @@ namespace BDArmory.Control
         {
             if (!BDArmorySettings.GUNS_FIRST || missile == null) return true;
             if (missile.TargetingMode != MissileBase.TargetingModes.Heat || shooter == null || target == null) return false;
+            return GunHitBy(shooter, target);
+        }
+
+        /// <summary>
+        /// A craft that has taken damage: gun hits disable a fighter through its engines, lift and controls long before they shoot parts
+        /// off (the airframe integrity of gunned-down fighters was 0.84-0.92), so any loss counts.
+        /// </summary>
+        public const float damagedIntegrity = 0.95f;
+        public static bool Damaged(Vessel v) => v != null && v.loaded && (!v.IsControllable || GameModes.AirframeIntegrity.Of(v) < damagedIntegrity);
+
+        /// <summary>Whether the shooter's guns have hit the target (competition scores).</summary>
+        public static bool GunHitBy(Vessel shooter, Vessel target)
+        {
+            if (shooter == null || target == null) return false;
             var scores = BDACompetitionMode.Instance != null ? BDACompetitionMode.Instance.Scores : null;
             if (scores == null || !scores.ScoreData.TryGetValue(target.vesselName, out var victim)) return false;
             return victim.hitCounts.ContainsKey(shooter.vesselName) || victim.damageFromGuns.ContainsKey(shooter.vesselName);
+        }
+
+        /// <summary>
+        /// A damaged craft that is going down: uncontrolled, or falling fast low down. It is no threat any more, and chasing it into the
+        /// ground costs the shooter its energy and its picture of the rest of the fight.
+        /// </summary>
+        public static bool GoingDown(Vessel v) =>
+            v != null && v.loaded && !v.LandedOrSplashed && Damaged(v)
+            && (!v.IsControllable || v.verticalSpeed < -40 && v.radarAltitude < 3000 || v.verticalSpeed < -15 && v.radarAltitude < 400);
+
+        /// <summary>
+        /// Against an air target our guns have hit (or that is already damaged), a heat-seeker that can be launched now finishes it from
+        /// where we are; the gun means following it in. With one usable in its envelope, the gun gives way to it.
+        /// </summary>
+        bool HeatSeekerFinishes(Vessel target, float distance)
+        {
+            if (target == null || target.LandedOrSplashed || !(Damaged(target) || GunHitBy(vessel, target))) return false;
+            foreach (var missile in VesselModuleRegistry.GetModules<MissileBase>(vessel))
+            {
+                if (missile == null || missile.HasFired || missile.launched || !missile.engageAir || missile.TargetingMode != MissileBase.TargetingModes.Heat) continue;
+                if (missile.GetWeaponChannel() > weaponChannel || !GunsFirstAllows(vessel, missile, target)) continue;
+                if (distance > 1.2f * Mathf.Max(missile.minStaticLaunchRange, 200f) && distance < 0.8f * missile.maxStaticLaunchRange) return true;
+            }
+            return false;
         }
 
         // extension for feature_engagementenvelope: check engagement parameters of the weapon if it can be used against the current target
         bool CheckEngagementEnvelope(IBDWeapon weaponCandidate, float distanceToTarget, Vessel targetVessel)
         {
             if (BDArmorySettings.GUNS_FIRST && weaponCandidate is MissileBase gatedMissile && !GunsFirstAllows(vessel, gatedMissile, targetVessel)) return false;
+            if (weaponCandidate.GetWeaponClass() == WeaponClasses.Gun && HeatSeekerFinishes(targetVessel, distanceToTarget)) return false;
             EngageableWeapon engageableWeapon = weaponCandidate as EngageableWeapon;
 
             if (engageableWeapon == null) return true;

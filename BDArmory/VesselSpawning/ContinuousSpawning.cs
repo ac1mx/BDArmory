@@ -37,6 +37,42 @@ namespace BDArmory.VesselSpawning
 
         void LogMessage(string message, bool toScreen = true, bool toLog = true) => LogMessageFrom("ContinuousSpawning", message, toScreen, toLog);
 
+        // Team rounds (test runs: GameData/BDArmory/PluginData/team_rounds.on): a craft that dies isn't respawned while its side fights on.
+        // Once a side has nobody left the round is over: the survivors are removed and every craft respawns together for the next round.
+        static readonly bool teamRounds = File.Exists(Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/PluginData/team_rounds.on"));
+        int teamRound;
+        float teamRoundStart;
+        bool teamRoundEnding;
+        readonly HashSet<string> teamRoundFlown = new HashSet<string>(); // Craft that have flown in this round.
+
+        static IEnumerable<MissileFire> LivingCompetitors() =>
+            LoadedVesselSwitcher.Instance.WeaponManagers.SelectMany(tm => tm.Value).Where(wm => wm != null && wm.vessel != null && wm.vessel.loaded
+                && wm.vessel.vesselType != VesselType.Debris && !GameModes.CleanDamage.IsShotDown(wm.vessel));
+
+        /// <summary>
+        /// Team rounds: once every craft of the round has flown and one side has been wiped out, remove the survivors (logging the round)
+        /// and let the respawn wait until nobody is left. True while dead craft may not be respawned yet.
+        /// </summary>
+        bool HoldForTeamRound(int roundSize)
+        {
+            if (!teamRounds) return false;
+            var living = LivingCompetitors().ToList();
+            if (living.Count == 0) // Everyone gone: the next round starts.
+            {
+                if (teamRoundEnding || teamRound == 0) { teamRoundEnding = false; ++teamRound; teamRoundStart = Time.time; teamRoundFlown.Clear(); }
+                return false;
+            }
+            if (teamRoundEnding) return true;
+            foreach (var wm in living) teamRoundFlown.Add(wm.vessel.vesselName);
+            if (teamRoundFlown.Count < roundSize) return true; // Still spawning this round's craft.
+            var teamsAlive = living.Select(wm => wm.Team != null ? wm.Team.Name : wm.vessel.vesselName).Distinct().ToList();
+            if (teamsAlive.Count >= 2) return true; // The round goes on: no respawns.
+            teamRoundEnding = true;
+            LogMessage($"TeamRound {teamRound} won by {teamsAlive[0]} after {Time.time - teamRoundStart:F0}s, survivors {string.Join(", ", living.Select(wm => wm.vessel.vesselName))}", false);
+            foreach (var wm in living) SpawnUtils.RemoveVessel(wm.vessel);
+            return true;
+        }
+
         public override IEnumerator Spawn(SpawnConfig spawnConfig)
         {
             var circularSpawnConfig = spawnConfig as CircularSpawnConfig;
@@ -168,8 +204,10 @@ namespace BDArmory.VesselSpawning
                         continuousSpawnedVesselCount %= spawnSlots.Count;
                     }
                     // Add any craft that hasn't been spawned or has died to the spawn queue if it isn't already in the queue.
+                    bool holdRespawns = HoldForTeamRound(spawnConfig.craftFiles.Count);
                     foreach (var craftURL in spawnConfig.craftFiles.Where(craftURL =>
                         (BDArmorySettings.VESSEL_SPAWN_LIVES_PER_VESSEL == 0 || spawnCounts[craftURL] < BDArmorySettings.VESSEL_SPAWN_LIVES_PER_VESSEL) && // Still has lives
+                        (!holdRespawns || !craftURLToVesselName.ContainsKey(craftURL)) && // Team rounds: the dead wait for the round to end.
                         !spawnQueue.Contains(craftURL) && !currentlySpawning.Contains(craftURL) && ( // Not already in the queue or currently spawning
                             !craftURLToVesselName.ContainsKey(craftURL) || // Hasn't spawned yet
                             (

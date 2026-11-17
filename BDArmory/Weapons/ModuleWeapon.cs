@@ -5902,7 +5902,11 @@ namespace BDArmory.Weapons
                     else //no lock for our secondary target/fixed gun/no multitargeting? slave weapon to primary lock
                     {
                         bool isVessel = weaponManager.slavedTarget.vessel != null;
-                        if (!isVessel || !(targetInVisualRange && RadarUtils.GetVesselChaffFactor(weaponManager.slavedTarget.vessel) < 1f))
+                        // A fixed gun is pointed by the pilot at its visual target: slaving it to a radar lock on another craft gives a
+                        // lead for the wrong craft (with two locks, a different one tick to tick).
+                        bool fixedGunOnOtherTarget = aiControlled && !(turret && (maxPitch != minPitch || yawRange > 0)) && isVessel && targetInVisualRange
+                            && visualTargetVessel != null && weaponManager.slavedTarget.vessel != visualTargetVessel;
+                        if (!fixedGunOnOtherTarget && (!isVessel || !(targetInVisualRange && RadarUtils.GetVesselChaffFactor(weaponManager.slavedTarget.vessel) < 1f)))
                         {
                             if (weaponManager.slavingTurrets) slaved = true;
                             targetRadius = isVessel ? weaponManager.slavedTarget.vessel.GetRadius() : 35f;

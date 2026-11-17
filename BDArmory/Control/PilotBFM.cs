@@ -510,34 +510,50 @@ namespace BDArmory.Control
         /// </summary>
         bool FlyBFM(FlightCtrlState s)
         {
+            recordedBfmExit = 0;
             bool flying = FlyBFMPlan(s);
             if (!flying) bfmLift = Vector3.zero;
             return flying;
         }
 
+        // Flight recorder: the last step FlyBFMPlan reached this tick (0 not called, 1 gated off, 2 no opponent, 3 second-bandit defence,
+        // 4 aim handover, 5 stand-off, 6 manoeuvre, 7 plan) and the handover check's nose-to-lead angle (°, -1 unchecked).
+        int recordedBfmExit;
+        float recordedHandoverOff = -1f;
+
         bool FlyBFMPlan(FlightCtrlState s)
         {
             var weaponManager = WeaponManager;
+            recordedBfmExit = 1;
             if (!bfmPlanner || !TacticsAllowed(weaponManager) || regainEnergy || weaponManager.isVIP && VIPTracker.EscortCount(weaponManager.Team) > 0) { bfmPlan.valid = false; return false; }
             Vessel opponent = targetVessel != null && !targetVessel.LandedOrSplashed && (targetVessel.CoM - vessel.CoM).sqrMagnitude < bfmRange * bfmRange ? targetVessel : null;
             Vessel threat = BFMThreat(weaponManager);
             if (threat != null && (threat == opponent || threat.LandedOrSplashed || (threat.CoM - vessel.CoM).sqrMagnitude > bfmRange * bfmRange)) threat = null;
             if (opponent == null) { opponent = threat; threat = null; }
+            recordedBfmExit = 2;
             if (opponent == null || targetTrack.vessel != opponent && threatTrack.vessel != opponent) { bfmPlan.valid = false; return false; }
             if (targetTrack.vessel != opponent) // Fighting the threat rather than our target: predict it as the opponent.
             {
                 targetTrack.vessel = threatTrack.vessel; targetTrack.force = threatTrack.force; targetTrack.have = threatTrack.have; targetTrack.maxNormal = threatTrack.maxNormal;
             }
 
+            // A second bandit on our six with its nose on us comes first: defend against it (break, jink, threat turn) rather than press
+            // the shot on our target and let the generic gunfire evasion fly us out of the fight.
+            recordedBfmExit = 3;
+            if (NewDogfight && threat != null && threat != opponent && DefendAgainst(threat) && FlyManoeuvre(s, threat)) { ++bfmTicks; ++secondBanditDefences; return true; }
             // A shot available now: hand over to the aiming.
+            recordedBfmExit = 4;
             if (opponent == targetVessel && WeaponOnTarget(weaponManager, opponent)) { ++bfmAimHandovers; bfmPlan.valid = false; return false; }
             // A close-in fight the engagement planner has turned down: leave it to the extend.
+            recordedBfmExit = 5;
             if (opponent == targetVessel && StandOff(opponent, (opponent.CoM - vessel.CoM).magnitude)) { bfmPlan.valid = false; return false; }
+            recordedBfmExit = 6;
 
             if (IsExtending && extendTarget == opponent) StopExtending("manoeuvre planner");
             NoteCrossing(opponent);
             NotePass(opponent);
             if (opponent == targetVessel && FlyManoeuvre(s, opponent)) { ++bfmTicks; return true; }
+            recordedBfmExit = 7;
             if (!bfmPlan.valid || Time.time >= bfmNextPlanTime)
             {
                 long start = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -564,7 +580,7 @@ namespace BDArmory.Control
             Vector3 flyTo = vessel.CoM + 100f * (Mathf.Cos(angle) * dir + Mathf.Sin(angle) * lift);
             steerMode = SteerModes.Manoeuvering;
             finalMaxSteer = Mathf.Clamp(bfmPlan.load * 1.05f + 0.05f, 0.1f, 1f);
-            if (bfmPlan.fullPower) AdjustThrottle(maxSpeed, false, true, true);
+            if (bfmPlan.fullPower || bfmSandwich && NewDogfight) AdjustThrottle(maxSpeed, false, true, true); // In the sandwich the wingman's life is the clock.
             else AdjustThrottle(minSpeed, true, false);
             SetStatus($"Engaging ({bfmPlan.label})");
             NoteTactic($"BFM: {bfmPlan.label}");
@@ -649,6 +665,7 @@ namespace BDArmory.Control
             if (gun == null) return false;
             Vector3 aim = opponent.CoM - gun.GetLeadOffset();
             float off = VectorUtils.Angle(vesselTransform.up, aim - vessel.CoM);
+            recordedHandoverOff = off;
             if (!NewGunnery) return distance < 1.2f * GunEmploymentRange(weaponManager) && off < 20f;
             // Lead pursuit builds the gun shot (flights: ten times the time on target of the planner alone), so it takes over whenever
             // the nose is within reach of the lead point: the snapshot window inside 1.5 gun ranges, 20° out to 2.5 km.

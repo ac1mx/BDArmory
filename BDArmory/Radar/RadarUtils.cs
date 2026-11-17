@@ -3188,8 +3188,12 @@ namespace BDArmory.Radar
         public static float MissDistance(ModuleWeapon threatWeapon, Vessel self) // Returns how far away bullets from enemy are from craft in meters
         {
             Transform fireTransform = threatWeapon.fireTransforms[0];
-            // If we're out of range, then it's not a threat.
-            if (threatWeapon.maxEffectiveDistance * threatWeapon.maxEffectiveDistance < (fireTransform.position - self.CoM).sqrMagnitude) return float.MaxValue;
+            // If we're out of range, then it's not a threat. Its weapon manager doesn't fire guns beyond its gun range, which is often far
+            // shorter than the part's effective distance (10 km on some cannons).
+            float reach = threatWeapon.maxEffectiveDistance;
+            var threatWeaponManager = threatWeapon.WeaponManager;
+            if (threatWeaponManager != null && threatWeaponManager.gunRange > 0f && threatWeapon.GetWeaponClass() == WeaponClasses.Gun) reach = Mathf.Min(reach, threatWeaponManager.gunRange);
+            if (reach * reach < (fireTransform.position - self.CoM).sqrMagnitude) return float.MaxValue;
             // If we have a firing solution, use that, otherwise use relative vessel positions
             Vector3 aimDirection = fireTransform.forward;
             float targetCosAngle = threatWeapon.FiringSolutionVector != null ? Vector3.Dot(aimDirection, (Vector3)threatWeapon.FiringSolutionVector) : Vector3.Dot(aimDirection, (self.vesselTransform.position - fireTransform.position).normalized);

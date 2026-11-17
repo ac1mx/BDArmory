@@ -2382,7 +2382,8 @@ namespace BDArmory.Control
             }
             else if (Committed && Time.time < evasionHoldUntil && !belowMinAltitude && weaponManager != null)
             {
-                Evasive(s);
+                flyingEvasionHold = true;
+                try { Evasive(s); } finally { flyingEvasionHold = false; }
                 turningTimer = 0;
                 if (evading) return;
             }
@@ -3750,7 +3751,7 @@ namespace BDArmory.Control
                 string name = string.Join("_", vessel.vesselName.Split(System.IO.Path.GetInvalidFileNameChars()));
                 flightRecorder = new System.IO.StreamWriter(System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "GameData/BDArmory/Logs", $"flightdata-{DateTime.Now:HHmmss}-{++flightRecorderCount}-{name}.csv"));
                 // throttle is this frame's input before the speed controller's; appliedThrottle is what the craft flew with last frame, thrust its engines' total (kN).
-                flightRecorder.WriteLine("time,dt,pitchRate,yawRate,rollRate,pitch,yaw,roll,throttle,q,speed,mach,machFactor,sinAoA,sinSideslip,constPitch,constYaw,constRoll,gimbalPitch,gimbalYaw,gimbalRoll,moiPitch,moiYaw,moiRoll,mass,radarAlt,pitchError,yawError,confPitch,confYaw,confRoll,belowMinAlt,status,steerMode,gunSelected,targetDistance,turnRadius,rollError,rollLead,appliedThrottle,thrust,flyCalls,targetTurn,targetPitchRate,pitchP,pitchI,pitchD,pitchRaw,govPitch,govYaw,govRoll,appliedPitch,velocityTurn,evadeChosen,missileTime,closingTime,evadeBranch,geometryHeld,statusText");
+                flightRecorder.WriteLine("time,dt,pitchRate,yawRate,rollRate,pitch,yaw,roll,throttle,q,speed,mach,machFactor,sinAoA,sinSideslip,constPitch,constYaw,constRoll,gimbalPitch,gimbalYaw,gimbalRoll,moiPitch,moiYaw,moiRoll,mass,radarAlt,pitchError,yawError,confPitch,confYaw,confRoll,belowMinAlt,status,steerMode,gunSelected,targetDistance,turnRadius,rollError,rollLead,appliedThrottle,thrust,flyCalls,targetTurn,targetPitchRate,pitchP,pitchI,pitchD,pitchRaw,govPitch,govYaw,govRoll,appliedPitch,velocityTurn,evadeChosen,missileTime,closingTime,evadeBranch,geometryHeld,bfmExit,handoverOff,gunThreat,statusText");
             }
             Vector3 w = vessel.angularVelocity, velDir = vessel.Velocity().normalized, moi = vessel.MOI;
             var weaponManager = WeaponManager;
@@ -3773,8 +3774,12 @@ namespace BDArmory.Control
                     weaponManager != null && weaponManager.incomingMissileTime < 1e6f ? weaponManager.incomingMissileTime : -1f,
                     weaponManager != null && weaponManager.incomingMissileVessel != null ? weaponManager.ThreatClosingTime(weaponManager.incomingMissileVessel) : -1f,
                     recordedEvadeBranch, geometryHeldThisTick ? 1 : 0)
+                + string.Format(System.Globalization.CultureInfo.InvariantCulture, ",{0},{1:F1},{2:F0}", recordedBfmExit, recordedHandoverOff,
+                    weaponManager != null && weaponManager.underFire && weaponManager.incomingThreatVessel != null ? Mathf.Sqrt(weaponManager.incomingThreatDistanceSqr) : -1f)
                 + "," + (currentStatus ?? "").Replace(',', ';'));
             recordedFlyCalls = 0;
+            recordedBfmExit = 0;
+            recordedHandoverOff = -1f;
             recordedVelocityDirection = velDir;
             if (++flightRecorderLines % 100 == 0) flightRecorder.Flush();
         }
@@ -4744,6 +4749,14 @@ namespace BDArmory.Control
                     }
                 }
 
+                if (NewDogfight && weaponManager.incomingThreatVessel != null && !weaponManager.incomingThreatVessel.LandedOrSplashed)
+                {
+                    // The barrel roll aims ahead of the nose, so once the nose is up the dodge keeps climbing (an F-15 at 700 m/s went
+                    // ballistic to 50 km). Above the fight there is nothing to gain: no climbing past the shooter's height plus a margin.
+                    float ceiling = Mathf.Max(defaultAltitude * 1.5f, (float)weaponManager.incomingThreatVessel.radarAltitude + 1500f);
+                    float up = Vector3.Dot(breakTarget, upDirection);
+                    if (up > 0f && vessel.radarAltitude > ceiling) breakTarget -= (up + 0.2f * breakTarget.magnitude) * upDirection;
+                }
                 breakTarget = GetLimitedClimbDirectionForSpeed(breakTarget);
                 HoldEvasionDirection(breakTarget);
                 breakTarget += vessel.transform.position;

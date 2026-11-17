@@ -249,6 +249,9 @@ namespace BDArmory.Control
         {
             if (!SectionActive(weaponManager) || !SectionFresh || section.wingmanTarget != v || distanceToTarget < 8000f) return false;
             var missile = weaponManager.CurrentMissile;
+            // The bracket sets up missile shots from two sides. With no missile to shoot (guns only), or with the wingman already in a
+            // close fight with it, the offset only keeps us out of the fight: go straight in.
+            if (NewDogfight && (missile == null || section.wingmanEngaged)) return false;
             if (missile != null && distanceToTarget < 1.2f * MissileLaunchParams.GetDynamicLaunchParams(missile, v.Velocity(), v.CoM).maxLaunchRange) return false; // In range: nose on.
             if (weaponManager.missileIsIncoming) return false;
             float angle = Mathf.Min(30f, CrankAngle(weaponManager));
@@ -264,10 +267,35 @@ namespace BDArmory.Control
         bool bfmHaveWingman;
         float bfmDragWeight, bfmSplitWeight, bfmWingmanStartDistance;
 
+        bool bfmSandwich;
+        int sectionDragRefusals;
+        const float dragWingmanReach = 1500f;
+
+        /// <summary>
+        /// Whether dragging the bandit on our tail towards the free wingman works: the wingman must get within reach of it (gun or short
+        /// missile range) before it closes into its own gun range on us. Against a faster bandit already near its gun range the drag is a
+        /// straight-line run in front of its guns, and it kills the bait before the hunter arrives.
+        /// </summary>
+        bool DragBuysTime(Vessel attacker)
+        {
+            if (!NewDogfight) return true;
+            Vector3 toUs = vessel.CoM - attacker.CoM;
+            float range = toUs.magnitude, reach = 1.5f * bfmThreatGunRange;
+            if (range < reach) return false; // Already in (or at the edge of) its gun envelope.
+            float gaining = Vector3.Dot(attacker.Velocity() - vessel.Velocity(), toUs / range);
+            if (gaining <= 0f) return true; // It isn't gaining on us.
+            float timeToItsShot = (range - reach) / gaining;
+            Vector3 wingmanToIt = attacker.CoM - section.wingman.CoM;
+            float wingmanRange = wingmanToIt.magnitude;
+            float wingmanClosing = Mathf.Max(Vector3.Dot(section.wingman.Velocity() - attacker.Velocity(), wingmanToIt / Mathf.Max(wingmanRange, 1f)), 50f);
+            float timeToWingmanShot = Mathf.Max(0f, wingmanRange - dragWingmanReach) / wingmanClosing;
+            return timeToWingmanShot < 0.8f * timeToItsShot;
+        }
+
         /// <summary>Set up the section terms of the close-in planner's score for this pass; may widen the stand-off range when supporting.</summary>
         void SectionBFMContext(Vessel opponent, ref float energyWeight)
         {
-            bfmHaveWingman = false; bfmDragWeight = bfmSplitWeight = 0f;
+            bfmHaveWingman = false; bfmSandwich = false; bfmDragWeight = bfmSplitWeight = 0f;
             if (!SectionActive(WeaponManager) || !SectionFresh || section.wingmanDistance > 12000f) return;
             bfmHaveWingman = true;
             bfmWingmanPosition = section.wingman.CoM;
@@ -280,9 +308,11 @@ namespace BDArmory.Control
             }
             else if (weAreDefensive && !section.wingmanDefensive)
             {
-                bfmDragWeight = 0.4f; ++sectionDragTicks; NoteTactic("Drag"); // Bring it across the wingman's nose.
+                if (DragBuysTime(opponent)) { bfmDragWeight = 0.4f; ++sectionDragTicks; NoteTactic("Drag"); } // Bring it across the wingman's nose.
+                else ++sectionDragRefusals; // It would run us down first: fight it (the defensive manoeuvres) until the wingman arrives.
             }
-            if (opponent == section.wingmanAttacker) { ++sectionSandwichTicks; NoteTactic("Sandwich"); }
+            bfmSandwich = opponent == section.wingmanAttacker;
+            if (bfmSandwich) { ++sectionSandwichTicks; NoteTactic("Sandwich"); energyWeight *= 0.5f; } // The wingman is buying the time: spend energy to get there.
             else if (opponent == section.wingmanTarget && section.wingmanEngaged && section.wingmanTargetDistance < (opponent.CoM - vessel.CoM).magnitude)
             {
                 // The wingman's fight with our target: stand off at missile range with height rather than crowd its circle.
@@ -307,8 +337,9 @@ namespace BDArmory.Control
         #endregion
 
         string SectionMetrics() => string.Format(System.Globalization.CultureInfo.InvariantCulture,
-            "section={0} wingman {1:F0}s sandwich {2:F1}s drag {3:F1}s split {4:F1}s support {5:F1}s grinder {6:F1}s bracket {7:F1}s sharedHolds {8} tether {9:F1}s",
+            "section={0} wingman {1:F0}s sandwich {2:F1}s drag {3:F1}s dragRefused {10:F1}s split {4:F1}s support {5:F1}s grinder {6:F1}s bracket {7:F1}s sharedHolds {8} tether {9:F1}s",
             sectionTactics, sectionWingmanTime, sectionSandwichTicks * bfmReplanInterval, sectionDragTicks * bfmReplanInterval, sectionSplitTicks * bfmReplanInterval,
-            sectionSupportTicks * bfmReplanInterval, sectionGrinderTicks * Time.fixedDeltaTime, sectionBracketTicks * Time.fixedDeltaTime, sectionSharedHolds, sectionTetherTicks * Time.fixedDeltaTime);
+            sectionSupportTicks * bfmReplanInterval, sectionGrinderTicks * Time.fixedDeltaTime, sectionBracketTicks * Time.fixedDeltaTime, sectionSharedHolds, sectionTetherTicks * Time.fixedDeltaTime,
+            sectionDragRefusals * bfmReplanInterval);
     }
 }

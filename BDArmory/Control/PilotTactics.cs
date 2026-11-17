@@ -414,10 +414,11 @@ namespace BDArmory.Control
         const float committedTargetBias = 1.5f;
         float missileEvadeHoldUntil, evasionHoldUntil;
         Vector3 heldEvasionDirection;
+        bool flyingEvasionHold; // Evasive is running only because of the hold: it steers the held break but doesn't extend it.
         void HoldEvasionDirection(Vector3 direction)
         {
             heldEvasionDirection = direction.normalized;
-            evasionHoldUntil = Time.time + committedEvasionTime;
+            if (!flyingEvasionHold) evasionHoldUntil = Time.time + committedEvasionTime; // Renewed from within the hold, a gun on our tail held a 30 s dodge into the ground.
         }
         // Comparison in one fight: GameData/BDArmory/PluginData/test_commit.on holds a word; only pilots of craft whose name contains it
         // hold their engagement geometry (CommitGeometry) and fly the missile break whenever they decided to evade.
