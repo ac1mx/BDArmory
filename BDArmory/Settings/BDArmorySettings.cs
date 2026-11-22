@@ -196,6 +196,7 @@ namespace BDArmory.Settings
         #region Physics constants
         [BDAPersistentSettingsField] public static float GLOBAL_LIFT_MULTIPLIER = 0.25f;
         [BDAPersistentSettingsField] public static float GLOBAL_DRAG_MULTIPLIER = 6f;
+        [BDAPersistentSettingsField] public static bool MISSILE_MACH_DRAG = true;           // Missiles with machDrag = true: zero-lift drag follows the Mach number (peaks at Mach 1.1, about half by Mach 3.5).
         [BDAPersistentSettingsField] public static float RECOIL_FACTOR = 0.75f;
         [BDAPersistentSettingsField] public static float DMG_MULTIPLIER = 100f;
         [BDAPersistentSettingsField] public static float BALLISTIC_DMG_FACTOR = 1.55f;

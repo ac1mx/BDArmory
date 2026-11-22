@@ -9,6 +9,7 @@ namespace BDArmory.Control
     {
         public float mass, thrust, boostTime, cruiseThrust, cruiseTime, dropTime, liftArea, dragArea, maxAoA, maxTorque, blastRadius;
         public float liftMultiplier, dragMultiplier;
+        public bool machDrag;      // Zero-lift drag follows the Mach number (BDArmorySettings.MISSILE_MACH_DRAG).
         public float responseTime; // s: time constant of the turning acceleration following the guidance command (0: at once).
         public GuidanceLaw law;    // Homing law (Config and ProNav: proportional navigation).
         public float lawRange;     // m: the law is flown inside this range of the target, proportional navigation before (0: all the way).
@@ -60,6 +61,21 @@ namespace BDArmory.Control
         }
         public static float Lift(float aoa) => Math.Max(Curve(liftKeys, aoa), 0f);
         public static float Drag(float aoa) => Math.Max(Curve(dragKeys, aoa), 0f);
+
+        // Zero-lift drag against Mach number, as a share of its transonic peak: a slender tactical missile coasting (base drag included),
+        // after Fleeman, Tactical Missile Design (Cd0 ~0.40 subsonic, ~0.95 at M1.1, ~0.53 at M3, ~0.40 at M5, on the body's cross-section).
+        // BDArmory's drag curve has no Mach term, so a missile lost energy at Mach 3 as fast as at the sound barrier.
+        static readonly float[] machKeys = { 0f, 0.42f, 0.8f, 0.44f, 0.95f, 0.58f, 1.1f, 1f, 1.3f, 0.97f, 1.6f, 0.86f, 2f, 0.74f, 2.5f, 0.63f, 3f, 0.56f, 4f, 0.46f, 5f, 0.42f };
+        /// <summary>Zero-lift drag at a Mach number relative to its peak (1 at Mach 1.1; piecewise linear).</summary>
+        public static float MachDrag(float mach)
+        {
+            if (mach <= machKeys[0]) return machKeys[1];
+            for (int i = 2; i < machKeys.Length; i += 2)
+                if (mach <= machKeys[i]) { float s = (mach - machKeys[i - 2]) / (machKeys[i] - machKeys[i - 2]); return machKeys[i - 1] + s * (machKeys[i + 1] - machKeys[i - 1]); }
+            return machKeys[machKeys.Length - 1];
+        }
+        /// <summary>Drag coefficient at an angle of attack with the zero-lift part following the Mach number (machDrag) or not.</summary>
+        public static float Drag(float aoa, float mach, bool machDrag) => machDrag ? Math.Max(Curve(dragKeys, aoa) - dragKeys[1] * (1f - MachDrag(mach)), 0f) : Drag(aoa);
 
         static float ThrustAt(in MissileSpec m, float t)
         {
@@ -186,7 +202,7 @@ namespace BDArmory.Control
         public static Result Fly(in MissileSpec m, double vx, double vy, double vz,
             double tx, double ty, double tz, double tvx, double tvy, double tvz, double tax, double tay, double taz, double targetMaxSpeed,
             double launchAltitude, Func<double, float> density, float gravity, float speedOfSound, float dt = 0.1f, float maxTime = 120f, float navigation = 3f, float elapsed = 0f,
-            float evadeG = 0f, float evadeTimeToGo = 0f, float evadePeriod = 0f)
+            float evadeG = 0f, float evadeTimeToGo = 0f, float evadePeriod = 0f, Func<double, float> soundSpeed = null)
         {
             double px = 0, py = 0, pz = 0;
             const double deg = Math.PI / 180.0;
@@ -216,6 +232,7 @@ namespace BDArmory.Control
                 double cpa = Math.Sqrt(cx * cx + cy * cy + cz * cz);
                 float rho = density(launchAltitude + pz);
                 float q = 0.5f * rho * (float)(speed * speed);
+                float mach = m.machDrag ? (float)speed / Math.Max(soundSpeed != null ? soundSpeed(launchAltitude + pz) : speedOfSound, 1f) : 0f;
                 float thrust;
                 bool burntOut;
                 if (!managedMotor) { thrust = ThrustAt(m, elapsed + t); burntOut = thrust == 0f && elapsed + t > m.dropTime + m.boostTime; }
@@ -290,7 +307,7 @@ namespace BDArmory.Control
                         aoa = hi;
                     }
                 }
-                double along = (thrust * Math.Cos(aoa * deg) - q * dragSk * Drag(aoa)) / mass;
+                double along = (thrust * Math.Cos(aoa * deg) - q * dragSk * Drag(aoa, mach, m.machDrag)) / mass;
                 vx += (along * ux + lx0) * dt;
                 vy += (along * uy + ly0) * dt;
                 vz += (along * uz + lz0 - gravity) * dt;

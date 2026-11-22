@@ -97,6 +97,15 @@ namespace BDArmory.Weapons.Missiles
         public float currDragArea = -1f;
 
         [KSPField]
+        public bool machDrag = false; // Zero-lift drag follows the Mach number; set by a missile's balance patch, whose motor is fitted for it.
+
+        /// <summary>Whether this round's zero-lift drag follows the Mach number (missiles fitted for it; bombs and torpedoes keep the flat curve).</summary>
+        public bool MachDrag => BDArmorySettings.MISSILE_MACH_DRAG && machDrag && _missileType == MissileType.Missile;
+        /// <summary>Drag coefficient (MissileGuidance.DefaultDragCurve) at an angle of attack and Mach number for this round.</summary>
+        public float DragCd(float aoa, float mach) =>
+            Mathf.Max(MissileGuidance.DefaultDragCurve.Evaluate(aoa) - (MachDrag ? MissileGuidance.DefaultDragCurve.Evaluate(0f) * (1f - MissileFlyout.MachDrag(mach)) : 0f), 0f);
+
+        [KSPField]
         public string steerMult = "0.5";
         private float[] parsedSteerMult;
         public float currSteerMult = 0.5f;
@@ -4191,7 +4200,7 @@ namespace BDArmory.Weapons.Missiles
                     Vector3d velocity = vessel.Velocity();
                     Vector3 CoL = new Vector3(0, 0, -1f);
                     float AoA = Mathf.Clamp(VectorUtils.Angle(part.transform.forward, velocity), 0, 90);
-                    double dragForce = 0.5 * airDensity * airSpeed * airSpeed * currDragArea * BDArmorySettings.GLOBAL_DRAG_MULTIPLIER * Mathf.Max(MissileGuidance.DefaultDragCurve.Evaluate(AoA), 0f);
+                    double dragForce = 0.5 * airDensity * airSpeed * airSpeed * currDragArea * BDArmorySettings.GLOBAL_DRAG_MULTIPLIER * DragCd(AoA, (float)vessel.mach);
                     rb.AddForceAtPosition((float)dragForce * -velocity.normalized,
                         part.transform.TransformPoint(part.CoMOffset + CoL));
                 }
@@ -4364,11 +4373,11 @@ namespace BDArmory.Weapons.Missiles
                     else
                     {
                         float AoA = smoothedAoA.Value;
-                        FloatCurve dragCurve = MissileGuidance.DefaultDragCurve;
-                        float dragCd = Mathf.Max(dragCurve.Evaluate(AoA), 0f);
+                        float sound = Mathf.Max((float)vessel.speedOfSound, 1f);
+                        float dragCd = DragCd(AoA, speed / sound);
                         float dragMultiplier = BDArmorySettings.GLOBAL_DRAG_MULTIPLIER;
                         dragTerm = 0.5f * airDensity * speed * speed * currDragArea * dragMultiplier * dragCd;
-                        float dragTermMinSpeed = 0.5f * airDensity * minSpeed * minSpeed * currDragArea * dragMultiplier * dragCurve.Evaluate(Mathf.Min(30f, maxAoA)); // Max AoA or 29 deg (at kink in drag curve)
+                        float dragTermMinSpeed = 0.5f * airDensity * minSpeed * minSpeed * currDragArea * dragMultiplier * DragCd(Mathf.Min(30f, maxAoA), minSpeed / sound); // Max AoA or 29 deg (at kink in drag curve)
                         t = part.mass * (speed - minSpeed) / ((dragTerm + dragTermMinSpeed) / 2f);
                     }
                     kinematicRange += t * (speed + minSpeed) / 2f;
@@ -4421,11 +4430,10 @@ namespace BDArmory.Weapons.Missiles
             else
             {
                 float AoA = smoothedAoA.Value;
-                FloatCurve dragCurve = MissileGuidance.DefaultDragCurve;
-                float dragCd = Mathf.Max(dragCurve.Evaluate(AoA), 0f);
+                float sound = Mathf.Max((float)vessel.speedOfSound, 1f);
                 float dragMultiplier = BDArmorySettings.GLOBAL_DRAG_MULTIPLIER;
-                boostDragAccel = 0.5f * airDensity * boostDragSpeed * boostDragSpeed * currDragArea * dragMultiplier * dragCd / part.mass;
-                cruiseDragAccel = 0.5f * airDensity * cruiseDragSpeed * cruiseDragSpeed * currDragArea * dragMultiplier * dragCd / part.mass;
+                boostDragAccel = 0.5f * airDensity * boostDragSpeed * boostDragSpeed * currDragArea * dragMultiplier * DragCd(AoA, boostDragSpeed / sound) / part.mass;
+                cruiseDragAccel = 0.5f * airDensity * cruiseDragSpeed * cruiseDragSpeed * currDragArea * dragMultiplier * DragCd(AoA, cruiseDragSpeed / sound) / part.mass;
             }
             burnoutRange = Mathf.Max(boostAccel - boostDragAccel, 0f) * boostTimeLeft * boostTimeLeft + Mathf.Max(cruiseAccel - cruiseDragAccel, 0f) * cruiseTimeLeft * cruiseTimeLeft + currentSpeed * (boostTimeLeft + cruiseTimeLeft);
             

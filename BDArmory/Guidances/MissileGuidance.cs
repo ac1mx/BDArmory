@@ -828,7 +828,7 @@ namespace BDArmory.Guidances
 
             // -------------- Calculate Remaining Aerodynamic Parameters --------------
             // Drag at 0 AoA
-            float D0 = 0.00215f * q * ml.currDragArea * BDArmorySettings.GLOBAL_DRAG_MULTIPLIER;
+            float D0 = ml.DragCd(0f, (float)ml.vessel.mach) * q * ml.currDragArea * BDArmorySettings.GLOBAL_DRAG_MULTIPLIER;
             // eta needs to change if the lift/drag curves are changed. Note this is for small angles (in radians)
             // Though we're now using C_L,max instead of C_L/alpha, the eta numbers resulting from this are approx. comparable to those used in Bonalli, Hérissé and Trélat's work
             float eta = 0.025f * BDArmorySettings.GLOBAL_DRAG_MULTIPLIER * ml.currDragArea / (BDArmorySettings.GLOBAL_LIFT_MULTIPLIER * ml.currLiftArea); // D = D0 + eta*Lalpha*AoA^2, quadratic approximation of drag.
@@ -2390,7 +2390,7 @@ namespace BDArmory.Guidances
             double dragForce = 0.0;
             if (airSpeed > 0)
             {
-                dragForce = dynamicq * dragArea * dragMultiplier * Mathf.Max(dragCurve.Evaluate(AoA), 0f);
+                dragForce = dynamicq * dragArea * dragMultiplier * (dragCurve == DefaultDragCurve ? ml.DragCd(AoA, (float)ml.vessel.mach) : Mathf.Max(dragCurve.Evaluate(AoA), 0f));
                 rb.AddForceAtPosition((float)dragForce * -velNorm,
                     forcePos);
             }

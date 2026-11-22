@@ -2,27 +2,33 @@
 # Modern Warfare 1 craft carry (on 4 or more craft); the rest keep their own configs.
 # run9: no-escape reach at 9 km, the target turning away at launch and running (km); hot9, hot3: head-on reach at 9 and 3 km (km);
 # speedMin, speedMax: band for the speed when the motor stops, level at 6 km (m/s);
-# activeRange (radar missiles, km): where the missile's own radar takes over from the launcher's (written as is, not fitted).
+# activeRange (radar missiles, km): where the missile's own radar takes over from the launcher's (written as is, not fitted);
+# dragArea: set, not fitted (radar missiles): the body's cross-section × 0.95 (zero-lift drag coefficient at its Mach 1.1 peak) / 12.9
+# (BDArmory's drag scale: GLOBAL_DRAG_MULTIPLIER 6 × the drag curve's 0.00215 × 1000). With the Mach drag model (machDrag, written to
+# every fitted part) the radar missiles keep their no-escape reach on real-size drag and carry their energy further head-on; the heat
+# missiles' drag is still fitted, which keeps the dogfight class's head-on reach short.
+# run3 (radar missiles, km): no-escape reach at 3 km, where most fights are flown; the flat-drag fit's own value, kept.
+# Run with --keeprange: each missile keeps its maxStaticLaunchRange.
 #
 # Short range, heat seeking: dogfight weapons; leaving the no-escape zone has to be possible from outside visual range.
-# name          hot9  run9  hot3  speedMin speedMax activeRange
+# name          hot9  run9  hot3  speedMin speedMax activeRange dragArea run3
 AIM9X            22    7.5   12    950   1150
 AA11Archer       24    8     13    950   1150
 MICA.IR          25    8.5   14    950   1150
 bahaAim9         18    6     10    900   1050
 #
 # Medium range, active radar: the main beyond-visual-range weapons; the launcher supports the shot until the last 15-20 km.
-AIM-120D         60   22     30   1150   1400     20
-bahaAim120       50   18     26   1100   1350     15
+AIM-120D         60   22     30   1150   1400     20   0.00183   15.3
+bahaAim120       50   18     26   1100   1350     15   0.00183   12.7
 #
-# Long range: largest no-escape zones, least agile; self-guided for the last 25-30 km.
-METEOR           90   40     40   1000   1300     25
-AA13R37Arrow    110   36     45   1200   1500     30
-RVV-AE-PD        90   34     40   1100   1400     25
+# Long range: largest no-escape zones, least agile; self-guided for the last 25-30 km. (METEOR: 1.3 × for the ramjet intakes.)
+METEOR           90   40     40   1000   1300     25   0.00238   27.7
+AA13R37Arrow    110   36     45   1200   1500     30   0.00835   25.6
+RVV-AE-PD        90   34     40   1100   1400     25   0.00231   24.5
 #
 # KSPCustom parts (GameData/Custom/Parts; the fitted motor is written into their own part configs, not MissileBalance.cfg).
 # AIM-260 JATM: AMRAAM-sized long-range round between the AIM-120D and the Meteor.
-AIM-260          78   32     50   1300   1600     22
+AIM-260          78   32     50   1300   1600     22   0.00183   23.7
 # AIM-174B Gunslinger and AIM-424 Malice: the US very-long-range class beside the R-37; heavy and slow-turning at the end.
-AIM-174B        105   40     60   1100   1400     35
-AIM-424         120   44     66   1250   1550     35
+AIM-174B        105   40     60   1100   1400     35   0.0068   28.8
+AIM-424         120   44     66   1250   1550     35   0.0068   32.6

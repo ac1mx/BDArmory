@@ -18,27 +18,35 @@ static class Program
     static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
     const float Gravity = 9.81f, SpeedOfSound = 300f;
     static float ResponseTime = 0.4f; // --lag: the replica's steering response time (s), as ShotModel uses.
-    static float[] densityTable; const float DensityStep = 200f;
+    static float[] densityTable, soundTable; const float DensityStep = 200f;
+    static bool MachDrag = true; // --flatdrag: the old flat zero-lift drag (BDArmorySettings.MISSILE_MACH_DRAG = false).
+    static bool KeepLaunchRange; // --keeprange: balance keeps each missile's maxStaticLaunchRange instead of 0.6 x the fitted head-on reach.
+    static readonly Dictionary<string, float> StaticRange = new();
 
-    static float Density(double altitude)
+    static float Lookup(float[] table, double altitude)
     {
-        if (densityTable == null) return (float)(1.225 * Math.Exp(-Math.Max(altitude, 0) / 5600.0));
-        float index = Math.Clamp((float)altitude / DensityStep, 0f, densityTable.Length - 1.001f);
+        float index = Math.Clamp((float)altitude / DensityStep, 0f, table.Length - 1.001f);
         int i = (int)index;
-        return densityTable[i] + (densityTable[i + 1] - densityTable[i]) * (index - i);
+        return table[i] + (table[i + 1] - table[i]) * (index - i);
     }
+    static float Density(double altitude) => densityTable == null ? (float)(1.225 * Math.Exp(-Math.Max(altitude, 0) / 5600.0)) : Lookup(densityTable, altitude);
+    static float Sound(double altitude) => soundTable == null ? SpeedOfSound : Lookup(soundTable, altitude);
 
     static void LoadAtmosphere(string path)
     {
         if (path == null || !File.Exists(path)) { Console.WriteLine("(no atmosphere table: exponential stand-in)"); return; }
         var rows = File.ReadAllLines(path).Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries)).Where(p => p.Length >= 2 && double.TryParse(p[0], NumberStyles.Float, Inv, out _))
-            .Select(p => (alt: double.Parse(p[0], Inv), rho: float.Parse(p[1], Inv))).OrderBy(r => r.alt).ToList();
+            .Select(p => (alt: double.Parse(p[0], Inv), rho: float.Parse(p[1], Inv), sound: p.Length >= 4 ? float.Parse(p[3], Inv) : SpeedOfSound)).OrderBy(r => r.alt).ToList();
         densityTable = new float[(int)(rows.Last().alt / DensityStep) + 2];
+        soundTable = new float[densityTable.Length];
         for (int i = 0; i < densityTable.Length; ++i)
         {
             double a = i * DensityStep;
             var lo = rows.LastOrDefault(r => r.alt <= a); var hi = rows.FirstOrDefault(r => r.alt >= a);
-            densityTable[i] = hi.alt == lo.alt ? lo.rho : lo.rho + (hi.rho - lo.rho) * (float)((a - lo.alt) / (hi.alt - lo.alt));
+            if (hi.alt <= lo.alt) { densityTable[i] = lo.rho; soundTable[i] = lo.sound; continue; }
+            float f = (float)((a - lo.alt) / (hi.alt - lo.alt));
+            densityTable[i] = lo.rho + (hi.rho - lo.rho) * f;
+            soundTable[i] = lo.sound + (hi.sound - lo.sound) * f;
         }
     }
 
@@ -58,6 +66,7 @@ static class Program
             var ml = part.Value.GetProperty("MissileLauncher");
             var wh = part.Value.GetProperty("warhead");
             float lift = F(ml, "liftArea", 0.015f), drag = F(ml, "dragArea", -1f);
+            StaticRange[part.Name] = F(ml, "maxStaticLaunchRange", -1f);
             float blast = F(wh, "blastRadius", -1f);
             if (blast <= 0) { float tnt = F(wh, "tntMass", 10f); blast = 3.5f * MathF.Cbrt(Math.Max(tnt, 0.1f)) * 1.5f; } // Rough stand-in when only the charge is given.
             float detonation = F(ml, "DetonationDistance", -1f);
@@ -67,7 +76,8 @@ static class Program
                 mass = (float)part.Value.GetProperty("mass").GetDouble(), thrust = F(ml, "thrust", 30), boostTime = F(ml, "boostTime", 2.2f),
                 cruiseThrust = F(ml, "cruiseThrust", 3), cruiseTime = F(ml, "cruiseTime", 45), dropTime = F(ml, "dropTime", 0.5f),
                 liftArea = lift, dragArea = drag > 0 ? drag : lift, maxAoA = F(ml, "maxAoA", 35), maxTorque = F(ml, "maxTorque", 90), blastRadius = blast,
-                liftMultiplier = 0.25f, dragMultiplier = 6f, responseTime = ResponseTime
+                liftMultiplier = 0.25f, dragMultiplier = 6f, responseTime = ResponseTime,
+                machDrag = MachDrag && ml.TryGetProperty("machDrag", out var md) && md.ToString().Trim().Equals("true", StringComparison.OrdinalIgnoreCase)
             };
             string targeting = ml.TryGetProperty("targetingType", out var tt) ? tt.GetString().ToLowerInvariant() : "none";
             result[part.Name] = (spec, F(ml, "maxOffBoresight", 180), F(ml, "activeRadarRange", 6000), targeting);
@@ -80,7 +90,7 @@ static class Program
         double a = aspectDeg * Math.PI / 180.0;
         double tvx = escape ? targetSpeed : -targetSpeed * Math.Cos(a), tvy = escape ? 0 : targetSpeed * Math.Sin(a);
         return MissileFlyout.Fly(m, launchSpeed, 0, 0, range, 0, targetAltitude - altitude, tvx, tvy, 0, escape ? 10 : 0, 0, 0, escape ? 1.25 * targetSpeed : targetSpeed,
-            altitude, Density, Gravity, SpeedOfSound);
+            altitude, Density, Gravity, SpeedOfSound, soundSpeed: Sound);
     }
 
     /// <summary>Longest launch distance that still reaches (bisection; assumes reach is lost once and for all beyond some distance).</summary>
@@ -105,7 +115,7 @@ static class Program
         foreach (var (name, (m, _, _, targeting)) in missiles.OrderBy(k => k.Value.targeting).ThenBy(k => k.Key))
         {
             double motor = (m.thrust * m.boostTime + m.cruiseThrust * m.cruiseTime) / m.mass;
-            var cut = MissileFlyout.Fly(m, 300, 0, 0, 1e7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6000, Density, Gravity, SpeedOfSound, maxTime: m.dropTime + m.boostTime + m.cruiseTime);
+            var cut = MissileFlyout.Fly(m, 300, 0, 0, 1e7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6000, Density, Gravity, SpeedOfSound, soundSpeed: Sound, maxTime: m.dropTime + m.boostTime + m.cruiseTime);
             double g = MissileFlyout.TurningG(m, 600f, Density(6000), Gravity);
             Console.WriteLine($"{name,-14}{targeting,-9}{motor,7:F0}{cut.speed,7:F0}" +
                 $"{Reach(m, 3000, 300, 280, 0, false) / 1000,7:F1}{Reach(m, 3000, 300, 280, 180, false) / 1000,7:F1}{Reach(m, 3000, 300, 280, 0, true) / 1000,7:F1}" +
@@ -133,9 +143,9 @@ static class Program
             double altitude = double.Parse(Get("launchAltMSL"), Inv), range = Math.Sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
             if (Math.Sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]) < 1) continue; // Launched at rest (harness bug in the first runs).
             double targetSpeed = Math.Max(Math.Sqrt(tv[0] * tv[0] + tv[1] * tv[1] + tv[2] * tv[2]), 50);
-            var straight = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], tv[0], tv[1], tv[2], 0, 0, 0, targetSpeed, altitude, Density, Gravity, SpeedOfSound);
+            var straight = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], tv[0], tv[1], tv[2], 0, 0, 0, targetSpeed, altitude, Density, Gravity, SpeedOfSound, soundSpeed: Sound);
             double h = Math.Sqrt(rel[0] * rel[0] + rel[1] * rel[1]); double ax = rel[0] / h, ay = rel[1] / h;
-            var escape = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], targetSpeed * ax, targetSpeed * ay, 0, 10 * ax, 10 * ay, 0, 1.25 * targetSpeed, altitude, Density, Gravity, SpeedOfSound);
+            var escape = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], targetSpeed * ax, targetSpeed * ay, 0, 10 * ax, 10 * ay, 0, 1.25 * targetSpeed, altitude, Density, Gravity, SpeedOfSound, soundSpeed: Sound);
             float kinematic = MissileFlyout.KinematicSpeed(m, Density(altitude), Gravity, SpeedOfSound);
             double margin = Math.Clamp(Math.Log(Math.Max(straight.speed, 1) / Math.Max(kinematic, 50)), -1, 2);
             double offB = Math.Clamp(double.Parse(Get("offBoresight"), Inv) / Math.Clamp(maxOffBoresight, 1, 180), 0, 2);
@@ -174,8 +184,8 @@ static class Program
             {
                 double targetSpeed = Math.Max(Math.Sqrt(tv[0] * tv[0] + tv[1] * tv[1] + tv[2] * tv[2]), 50);
                 double h = Math.Max(Math.Sqrt(rel[0] * rel[0] + rel[1] * rel[1]), 1); double ax = rel[0] / h, ay = rel[1] / h;
-                var straight = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], tv[0], tv[1], tv[2], 0, 0, 0, targetSpeed, alt, Density, Gravity, SpeedOfSound);
-                var escape = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], targetSpeed * ax, targetSpeed * ay, 0, 10 * ax, 10 * ay, 0, 1.25 * targetSpeed, alt, Density, Gravity, SpeedOfSound);
+                var straight = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], tv[0], tv[1], tv[2], 0, 0, 0, targetSpeed, alt, Density, Gravity, SpeedOfSound, soundSpeed: Sound);
+                var escape = MissileFlyout.Fly(m, vel[0], vel[1], vel[2], rel[0], rel[1], rel[2], targetSpeed * ax, targetSpeed * ay, 0, 10 * ax, 10 * ay, 0, 1.25 * targetSpeed, alt, Density, Gravity, SpeedOfSound, soundSpeed: Sound);
                 flyouts += 2;
                 if (r == 0)
                     foreach (var f in new[] { straight, escape })
@@ -185,13 +195,13 @@ static class Program
         Console.WriteLine($"{shots.Count} shots, {flyouts} flyouts, {watch.Elapsed.TotalMilliseconds * 1000 / flyouts:F1} us per flyout, checksum {checksum:R}");
     }
 
-    record Metrics(double Hot9, double Run9, double Hot3, double SpeedAtCut, double G);
+    record Metrics(double Hot9, double Run9, double Hot3, double SpeedAtCut, double G, double Run3);
 
-    static Metrics Measure(in MissileSpec m)
+    static Metrics Measure(in MissileSpec m, bool run3 = false)
     {
-        var cut = MissileFlyout.Fly(m, 300, 0, 0, 1e7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6000, Density, Gravity, SpeedOfSound, maxTime: m.dropTime + m.boostTime + m.cruiseTime);
+        var cut = MissileFlyout.Fly(m, 300, 0, 0, 1e7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6000, Density, Gravity, SpeedOfSound, soundSpeed: Sound, maxTime: m.dropTime + m.boostTime + m.cruiseTime);
         return new Metrics(Reach(m, 9000, 300, 280, 0, false) / 1000, Reach(m, 9000, 300, 280, 0, true) / 1000, Reach(m, 3000, 300, 280, 0, false) / 1000,
-            cut.speed, MissileFlyout.TurningG(m, 600f, Density(6000), Gravity));
+            cut.speed, MissileFlyout.TurningG(m, 600f, Density(6000), Gravity), run3 ? Reach(m, 3000, 300, 280, 0, true) / 1000 : 0);
     }
 
     /// <summary>
@@ -204,13 +214,16 @@ static class Program
     {
         var missiles = LoadMissiles(missilesPath);
         var targets = File.ReadAllLines(targetsPath).Select(l => l.Split('#')[0].Split(' ', StringSplitOptions.RemoveEmptyEntries)).Where(p => p.Length >= 6)
-            .ToDictionary(p => p[0], p => p.Skip(1).Take(6).Select(x => double.Parse(x, Inv)).ToArray());
+            .ToDictionary(p => p[0], p => p.Skip(1).Take(8).Select(x => double.Parse(x, Inv)).ToArray());
         var results = new Dictionary<string, (MissileSpec spec, Metrics before, Metrics after)>();
         var options = new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 4) };
         System.Threading.Tasks.Parallel.ForEach(targets, options, entry =>
         {
             if (!missiles.TryGetValue(entry.Key, out var info)) { Console.WriteLine($"{entry.Key}: not in {missilesPath}"); return; }
             var m0 = info.spec; var t = entry.Value;
+            bool fixedDrag = t.Length > 6 && t[6] > 0; // Column 7: a set drag area (from the body's size), not fitted.
+            if (fixedDrag) m0.dragArea = (float)t[6];
+            m0.machDrag = MachDrag; // Fitted for the Mach drag model; the patch turns it on for the part.
             // Parameters: log boost acceleration, boost time, log sustain acceleration (fraction of boost), sustain time, log drag area scale.
             double[] x0 = { Math.Log(m0.thrust / m0.mass), m0.boostTime, Math.Log(Math.Clamp(m0.cruiseThrust / Math.Max(m0.thrust, 1e-3f), 0.02f, 1f)), Math.Min(m0.cruiseTime, 90), 0 };
             MissileSpec Apply(double[] x)
@@ -224,10 +237,12 @@ static class Program
             double Loss(double[] x, out Metrics r)
             {
                 r = null;
-                if (x[1] < 1 || x[1] > 10 || x[3] < 0 || x[3] > 90 || x[2] > 0 || x[2] < Math.Log(0.02) || Math.Abs(x[4]) > Math.Log(5)) return double.MaxValue;
-                r = Measure(Apply(x));
+                if (x[1] < 1 || x[1] > 10 || x[3] < 0 || x[3] > 90 || x[2] > 0 || x[2] < Math.Log(0.02) || Math.Abs(x[4]) > Math.Log(5) || fixedDrag && x[4] != 0) return double.MaxValue;
+                bool run3 = t.Length > 7 && t[7] > 0; // Column 8: no-escape reach at 3 km (km), where most fights are flown.
+                r = Measure(Apply(x), run3);
                 double Sq(double v, double target) => Math.Pow(Math.Log(Math.Max(v, 0.1) / target), 2);
                 double loss = 2 * Sq(r.Run9, t[1]) + 0.7 * Sq(r.Hot9, t[0]) + 0.5 * Sq(r.Hot3, t[2]);
+                if (run3) loss += 2 * Sq(r.Run3, t[7]);
                 if (r.SpeedAtCut < t[3]) loss += 2 * Sq(r.SpeedAtCut, t[3]);
                 if (r.SpeedAtCut > t[4]) loss += 2 * Sq(r.SpeedAtCut, t[4]);
                 for (int i = 0; i < 5; ++i) loss += 0.01 * Math.Pow((x[i] - x0[i]) / (i == 1 || i == 3 ? Math.Max(x0[i], 2) : 1), 2);
@@ -265,12 +280,13 @@ static class Program
         {
             var (spec, before, after) = results[name]; var m0 = missiles[name].spec; var t = targets[name];
             Console.WriteLine($"{name,-14}{"before",8}{m0.thrust,8:F1}{m0.boostTime,7:F1}{m0.cruiseThrust,8:F1}{m0.cruiseTime,7:F0}{m0.dragArea,8:F4}{before.Hot9,7:F1}{before.Run9,7:F1}{before.Hot3,7:F1}{before.SpeedAtCut,7:F0}{before.G,6:F0}");
-            Console.WriteLine($"{"",-14}{"after",8}{spec.thrust,8:F1}{spec.boostTime,7:F1}{spec.cruiseThrust,8:F1}{spec.cruiseTime,7:F0}{spec.dragArea,8:F4}{after.Hot9,7:F1}{after.Run9,7:F1}{after.Hot3,7:F1}{after.SpeedAtCut,7:F0}{after.G,6:F0}  {string.Join(" ", t)}");
+            Console.WriteLine($"{"",-14}{"after",8}{spec.thrust,8:F1}{spec.boostTime,7:F1}{spec.cruiseThrust,8:F1}{spec.cruiseTime,7:F0}{spec.dragArea,8:F4}{after.Hot9,7:F1}{after.Run9,7:F1}{after.Hot3,7:F1}{after.SpeedAtCut,7:F0}{after.G,6:F0}{(after.Run3 > 0 ? $" run3 {after.Run3:F1}" : "")}  {string.Join(" ", t)}");
             // The launch zone adds closing speed × flight time to the static range, so 0.6 of the head-on reach lines it up with the reach head-on.
-            double maxStatic = Math.Round(0.6 * after.Hot9 * 2) / 2 * 1000;
+            double maxStatic = KeepLaunchRange && StaticRange.TryGetValue(name, out float kept) && kept > 0 ? kept : Math.Round(0.6 * after.Hot9 * 2) / 2 * 1000;
             // KSP turns underscores in part names into dots, so the config node can have either: match one character there.
             patch.Append(Inv, $"@PART[{name.Replace('.', '?')}]:FINAL\n{{\n\t@MODULE[MissileLauncher]\n\t{{\n\t\t%thrust = {spec.thrust:0.#}\n\t\t%boostTime = {spec.boostTime:0.#}\n\t\t%cruiseThrust = {spec.cruiseThrust:0.#}\n\t\t%cruiseTime = {spec.cruiseTime:0.#}\n\t\t%dragArea = {spec.dragArea:0.#####}\n\t\t%maxStaticLaunchRange = {maxStatic:0}\n");
             if (t.Length > 5 && t[5] > 0) patch.Append(Inv, $"\t\t%activeRadarRange = {t[5] * 1000:0}\n");
+            if (MachDrag) patch.Append("\t\t%machDrag = true\n");
             patch.Append("\t}\n}\n");
         }
         if (patchPath != null) File.WriteAllText(patchPath, patch.ToString());
@@ -303,7 +319,7 @@ static class Program
                         {
                             double a = aspect * Math.PI / 180.0, range = share * reach * (aspect > 90 ? 0.5 : 1);
                             var result = MissileFlyout.Fly(spec, launchSpeed, 0, 0, range, 0, 0, -targetSpeed * Math.Cos(a), targetSpeed * Math.Sin(a), 0, 0, 0, 0, targetSpeed,
-                                altitude, Density, Gravity, SpeedOfSound, evadeG: g, evadeTimeToGo: tgo, evadePeriod: period);
+                                altitude, Density, Gravity, SpeedOfSound, soundSpeed: Sound, evadeG: g, evadeTimeToGo: tgo, evadePeriod: period);
                             ++n;
                             if (result.reached) ++hits; else miss += result.missDistance;
                         }
@@ -349,6 +365,8 @@ static class Program
             ResponseTime = float.Parse(args[lag + 1], Inv);
             args = args.Take(lag).Concat(args.Skip(lag + 2)).ToArray();
         }
+        if (args.Contains("--flatdrag")) { MachDrag = false; args = args.Where(a => a != "--flatdrag").ToArray(); }
+        if (args.Contains("--keeprange")) { KeepLaunchRange = true; args = args.Where(a => a != "--keeprange").ToArray(); }
         if (args.Length >= 2 && args[0] == "tables") { LoadAtmosphere(args.Length > 2 ? args[2] : null); Tables(args[1]); return 0; }
         if (args.Length >= 4 && args[0] == "features") { LoadAtmosphere(args.Length > 4 ? args[4] : null); Features(args[1], args[2], args[3]); return 0; }
         if (args.Length >= 4 && args[0] == "balance") { LoadAtmosphere(args.Length > 4 ? args[4] : null); Balance(args[1], args[2], args[3]); return 0; }

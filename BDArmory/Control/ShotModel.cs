@@ -102,6 +102,7 @@ namespace BDArmory.Control
             blastRadius = Mathf.Max(ml.GetBlastRadius(), 1f),
             liftMultiplier = BDArmorySettings.GLOBAL_LIFT_MULTIPLIER,
             dragMultiplier = BDArmorySettings.GLOBAL_DRAG_MULTIPLIER,
+            machDrag = ml.MachDrag,
             responseTime = SteeringResponseTime
         };
         /// <summary>Time constant of a missile's turn following its guidance, fitted to range shots (bench/range, 0.4 s best of 0–1 s on 675 shots).</summary>
@@ -109,28 +110,34 @@ namespace BDArmory.Control
 
         // Air density against altitude for the current body, tabulated once per body (200 m steps): the atmosphere doesn't change.
         static CelestialBody densityBody;
-        static float[] densityTable;
+        static float[] densityTable, soundTable;
         const float densityStep = 200f;
-        static float Density(double altitude)
+        static float Lookup(float[] table, double altitude)
         {
-            if (densityTable == null) return 0f;
-            float index = Mathf.Clamp((float)altitude / densityStep, 0f, densityTable.Length - 1.001f);
+            if (table == null) return 0f;
+            float index = Mathf.Clamp((float)altitude / densityStep, 0f, table.Length - 1.001f);
             int i = (int)index;
-            return Mathf.Lerp(densityTable[i], densityTable[i + 1], index - i);
+            return Mathf.Lerp(table[i], table[i + 1], index - i);
         }
+        static float Density(double altitude) => Lookup(densityTable, altitude);
+        static float SoundSpeed(double altitude) => Mathf.Max(Lookup(soundTable, altitude), 1f);
         static void EnsureDensityTable(CelestialBody body)
         {
             if (body == densityBody && densityTable != null) return;
             densityBody = body;
             int n = body.atmosphere ? Mathf.Max(2, (int)(body.atmosphereDepth / densityStep) + 2) : 2;
-            densityTable = new float[n];
+            densityTable = new float[n]; soundTable = new float[n];
             for (int i = 0; i < n; ++i)
             {
                 double altitude = i * densityStep;
-                densityTable[i] = body.atmosphere ? (float)FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(altitude, body), FlightGlobals.getExternalTemperature(altitude, body), body) : 0f;
+                if (!body.atmosphere) { soundTable[i] = 300f; continue; }
+                double pressure = FlightGlobals.getStaticPressure(altitude, body);
+                double density = FlightGlobals.getAtmDensity(pressure, FlightGlobals.getExternalTemperature(altitude, body), body);
+                densityTable[i] = (float)density;
+                soundTable[i] = density > 0 ? (float)body.GetSpeedOfSound(pressure, density) : soundTable[Math.Max(i - 1, 0)];
             }
         }
-        static readonly Func<double, float> densityFunction = Density;
+        static readonly Func<double, float> densityFunction = Density, soundFunction = SoundSpeed;
         /// <summary>Air density (kg/m³) at an altitude above the body's sea level.</summary>
         public static float AirDensity(CelestialBody body, double altitude) { EnsureDensityTable(body); return Density(altitude); }
 
@@ -172,13 +179,13 @@ namespace BDArmory.Control
                 velocity = velocity.magnitude * (Mathf.Cos(elevation) * level.normalized + Mathf.Sin(elevation) * Vector3.forward);
             }
             features.straight = MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, relative.x, relative.y, relative.z, targetVelocity.x, targetVelocity.y, targetVelocity.z, 0, 0, 0,
-                Math.Max(target.srfSpeed, 1.0), altitude, densityFunction, gravity, speedOfSound);
+                Math.Max(target.srfSpeed, 1.0), altitude, densityFunction, gravity, speedOfSound, soundSpeed: soundFunction);
             // The target turns its back on the launch and runs, speeding up by a quarter.
             Vector3 away = new Vector3(relative.x, relative.y, 0f).normalized;
             float targetSpeed = Mathf.Max((float)target.srfSpeed, 50f);
             Vector3 escapeVelocity = targetSpeed * away;
             features.escape = MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, relative.x, relative.y, relative.z, escapeVelocity.x, escapeVelocity.y, escapeVelocity.z,
-                10f * away.x, 10f * away.y, 0, 1.25 * targetSpeed, altitude, densityFunction, gravity, speedOfSound);
+                10f * away.x, 10f * away.y, 0, 1.25 * targetSpeed, altitude, densityFunction, gravity, speedOfSound, soundSpeed: soundFunction);
             float kinematic = MissileFlyout.KinematicSpeed(spec, Density(altitude), gravity, speedOfSound);
             features.energyMargin = Mathf.Clamp(Mathf.Log(Mathf.Max(features.straight.speed, 1f) / Mathf.Max(kinematic, 50f)), -1f, 2f);
             features.aspect = VectorUtils.Angle(target.srf_vel_direction, -line);
@@ -214,7 +221,7 @@ namespace BDArmory.Control
             float gravity = (float)(body.GeeASL * PhysicsGlobals.GravitationalAcceleration);
             float speedOfSound = v.speedOfSound > 0 ? (float)v.speedOfSound : 300f;
             return MissileFlyout.Fly(Spec(ml), velocity.x, velocity.y, velocity.z, relative.x, relative.y, relative.z, tv.x, tv.y, tv.z, ta.x, ta.y, ta.z,
-                Mathf.Max(targetMaxSpeed, tv.magnitude), v.altitude, densityFunction, gravity, speedOfSound, dt: 0.2f, maxTime: 60f, elapsed: ml.TimeIndex);
+                Mathf.Max(targetMaxSpeed, tv.magnitude), v.altitude, densityFunction, gravity, speedOfSound, dt: 0.2f, maxTime: 60f, elapsed: ml.TimeIndex, soundSpeed: soundFunction);
         }
 
         /// <summary>
@@ -244,9 +251,9 @@ namespace BDArmory.Control
             {
                 Vector3 rel = range * line;
                 if (!escape)
-                    return MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, rel.x, rel.y, rel.z, tv.x, tv.y, tv.z, 0, 0, 0, Math.Max(targetSpeed, 1.0), altitude, densityFunction, gravity, speedOfSound, dt: 0.2f).reached;
+                    return MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, rel.x, rel.y, rel.z, tv.x, tv.y, tv.z, 0, 0, 0, Math.Max(targetSpeed, 1.0), altitude, densityFunction, gravity, speedOfSound, dt: 0.2f, soundSpeed: soundFunction).reached;
                 return MissileFlyout.Fly(spec, velocity.x, velocity.y, velocity.z, rel.x, rel.y, rel.z, targetSpeed * away.x, targetSpeed * away.y, 0, 10f * away.x, 10f * away.y, 0,
-                    1.25 * targetSpeed, altitude, densityFunction, gravity, speedOfSound, dt: 0.2f).reached;
+                    1.25 * targetSpeed, altitude, densityFunction, gravity, speedOfSound, dt: 0.2f, soundSpeed: soundFunction).reached;
             }
             float lo, hi;
             start = Mathf.Clamp(start, 1000f, 150000f);
