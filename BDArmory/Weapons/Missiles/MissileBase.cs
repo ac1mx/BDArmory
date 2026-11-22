@@ -1401,6 +1401,34 @@ namespace BDArmory.Weapons.Missiles
             ++shotInertialTicks;
         }
         public static int inertialCoastCount;
+
+        // The last track the missile had (from any source) and when: a track regained after losing it is only taken if it is where the
+        // target could have flown since (the inertial search gate around the dead-reckoned point). Without this a missile whose lock
+        // was broken swung across many kilometres onto whatever the launcher's radar had locked next, or onto a far-off relock.
+        Vector3 lastTrackPosition, lastTrackVelocity;
+        float lastTrackTime = -1f;
+        public static int reacquireRejectCount;
+        void NoteTrack(in TargetSignatureData track)
+        {
+            lastTrackPosition = track.predictedPosition; lastTrackVelocity = track.velocity; lastTrackTime = Time.time;
+        }
+        /// <summary>Where the last track puts the target now, if there has been one.</summary>
+        bool ExpectedTargetPosition(out Vector3 expected)
+        {
+            expected = lastTrackPosition + lastTrackVelocity * (Time.time - lastTrackTime);
+            return lastTrackTime >= 0f;
+        }
+        bool WithinReacquireGate(Vector3 position)
+        {
+            if (!ExpectedTargetPosition(out Vector3 expected)) return true;
+            float lost = Time.time - lastTrackTime;
+            if (lost < 0.5f) return true; // Still tracking (or a frame's gap).
+            float gate = Mathf.Min(500f + 0.5f * inertialTargetTurn * lost * lost, inertialGateMax);
+            if ((position - expected).sqrMagnitude <= gate * gate) return true;
+            ++reacquireRejectCount;
+            if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.MissileBase]: {shortName} ignored a track {(position - expected).magnitude:F0}m from where its target should be ({lost:F1}s since its last track, gate {gate:F0}m)");
+            return false;
+        }
         #endregion
 
         #region Coordinated salvo
@@ -1545,6 +1573,8 @@ namespace BDArmory.Weapons.Missiles
 
                                     if (hasIFF && Team.IsFriendly(possibleTargets[i].Team)) continue;
 
+                                    if (!WithinReacquireGate(possibleTargets[i].predictedPosition)) continue; // Not a craft somewhere else entirely.
+
                                     t = possibleTargets[i];
 
                                     break;
@@ -1554,9 +1584,9 @@ namespace BDArmory.Weapons.Missiles
                         else
                         {
                             (t, bool tempLocked) = vrd.detectedRadarTargetLock(radarTarget.vessel, FiredByWM);
-                            if (!tempLocked)
+                            if (!tempLocked || (t.exists && !WithinReacquireGate(t.predictedPosition)))
                             {
-                                // If not locked, unset t
+                                // If not locked (or the relock is far from where the target should be), unset t
                                 t = TargetSignatureData.noTarget;
                             }
                             /*List<TargetSignatureData> possibleTargets = vrd.GetLockedTargets();
@@ -1573,6 +1603,7 @@ namespace BDArmory.Weapons.Missiles
                             TargetAcquired = true;
                             hasLostLock = false;
                             radarTarget = t;
+                            NoteTrack(t);
                             //if (weaponClass == WeaponClasses.SLW) //Radar/Active Sonar guidance would be vulnerable to chaff/various acoustic CMs that function basically like chaff, so commenting this out
                             //{
                             //    TargetPosition = radarTarget.predictedPosition;
@@ -1718,6 +1749,7 @@ namespace BDArmory.Weapons.Missiles
                                 if (retarget)
                                 {
                                     if (currTarget.vessel == radarTarget.vessel || currTarget.targetInfo == null || currTarget.targetInfo.isMissile || !InTheFight(currTarget.vessel, currTarget.targetInfo)) continue;
+                                    if ((currTarget.predictedPosition - radarTarget.predictedPosition).sqrMagnitude > inertialGateMax * inertialGateMax) continue; // Its wingman, not a craft far across the fight.
                                     sqrDist = VectorUtils.Angle(currTarget.predictedPosition - transform.position, GetForwardTransform()); // Nearest the nose, not nearest the wreck.
                                 }
                                 if ((!retarget && sqrDist > sqrThresh) || sqrDist > closestDist)
@@ -1758,6 +1790,7 @@ namespace BDArmory.Weapons.Missiles
                                     RecordShotRetarget(selectedTarget.vessel);
                                 }
                                 radarTarget = selectedTarget;
+                                NoteTrack(selectedTarget);
                                 if (InertialCoasting)
                                 {
                                     InertialCoasting = false;
@@ -1790,10 +1823,12 @@ namespace BDArmory.Weapons.Missiles
                                 return;
                             }
 
-                            if (InertialCoasting && radarTarget.vessel != null && SupportingLock(radarTarget.vessel, out TargetSignatureData relocked) && relocked.exists)
+                            if (InertialCoasting && radarTarget.vessel != null && SupportingLock(radarTarget.vessel, out TargetSignatureData relocked) && relocked.exists
+                                && WithinReacquireGate(relocked.predictedPosition))
                             {
                                 // The launching side has its lock back: off the dead-reckoned point and onto the real track.
                                 radarTarget = relocked;
+                                NoteTrack(relocked);
                                 InertialCoasting = false;
                                 RecordShotSupport(false);
                                 TargetAcquired = true;
@@ -1837,9 +1872,10 @@ namespace BDArmory.Weapons.Missiles
                     if (radarTarget.vessel != null)
                     {
                         bool parentLocked = SupportingLock(radarTarget.vessel, out TargetSignatureData parentTrack);
-                        if (parentLocked && parentTrack.exists)
+                        if (parentLocked && parentTrack.exists && WithinReacquireGate(parentTrack.predictedPosition))
                         {
                             radarTarget = parentTrack;
+                            NoteTrack(parentTrack);
                             ++seekerHandBackCount;
                             RecordShotSupport(false);
                             TargetAcquired = true;
@@ -1922,7 +1958,9 @@ namespace BDArmory.Weapons.Missiles
                 Vector3 soughtTarget;
                 if (useSoughtTarget)
                 {
-                    soughtTarget = radarTarget.exists ? radarTarget.predictedPosition : targetVessel.Vessel.CoM;
+                    // Where the missile's own information puts the target, not where the craft really is: once the track is lost the
+                    // search is around the dead-reckoned point.
+                    soughtTarget = radarTarget.exists ? radarTarget.predictedPosition : ExpectedTargetPosition(out Vector3 expected) ? expected : targetVessel.Vessel.CoM;
                 }
                 else
                 {
@@ -1944,7 +1982,7 @@ namespace BDArmory.Weapons.Missiles
                     }
 
                     float tempDist = -1f;
-                    if (useSoughtTarget && (tempDist = (currTarget.predictedPosition - soughtTarget).sqrMagnitude) > 1000000f)
+                    if (useSoughtTarget && ((tempDist = (currTarget.predictedPosition - soughtTarget).sqrMagnitude) > 1000000f && !(lastTrackTime >= 0f && WithinReacquireGate(currTarget.predictedPosition))))
                     {
                         if (BDArmorySettings.DEBUG_MISSILES) Debug.Log($"[BDArmory.missileBase][Radar LOAL]: {shortName} with UUID: {vessel.id}: Target: {currTarget.Name()} with UUID: {currTarget.ID()} at index {i} too far from target lock!.");
                         continue;
@@ -2002,6 +2040,7 @@ namespace BDArmory.Weapons.Missiles
                 {
                     if (lockedTarget.vessel != null && shotTarget != lockedTarget.vessel) RecordShotRetarget(lockedTarget.vessel);
                     radarTarget = lockedTarget;
+                    NoteTrack(lockedTarget);
                     targetVessel = radarTarget.targetInfo;
                     TargetAcquired = true;
                     radarLOALSearching = false;

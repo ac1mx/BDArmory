@@ -1432,6 +1432,12 @@ namespace BDArmory.Weapons.Missiles
 
         void OnCollisionEnter(Collision col)
         {
+            if (HasFired && SourceVessel != null && TimeIndex < 10f)
+            {
+                var other = col.collider != null ? col.collider.gameObject.GetComponentInParent<Part>() : null;
+                if (other != null && other.vessel == SourceVessel)
+                    Debug.Log($"[BDArmory.MissileLauncher]: {shortName} touched its launcher {SourceVessel.vesselName} ({other.name}) {TimeIndex:F2}s after launch at {col.relativeVelocity.magnitude:F0} m/s");
+            }
             base.CollisionEnter(col);
         }
 
@@ -2021,6 +2027,7 @@ namespace BDArmory.Weapons.Missiles
                 //add target info to vessel
                 AddTargetInfoToVessel();
                 StartCoroutine(DecoupleRoutine());
+                if (SourceVessel != null && SourceVessel != vessel) StartCoroutine(ClearLauncherRoutine(SourceVessel));
                 if (BDArmorySettings.DEBUG_MISSILES) shortName = $"{SourceVessel.GetName()}'s {GetShortName()}";
                 vessel.vesselName = GetShortName();
                 vessel.vesselType = VesselType.Probe;
@@ -2121,6 +2128,44 @@ namespace BDArmory.Weapons.Missiles
             if (redployTurret && turret)
             {
                 turret.isReloading = false;
+            }
+        }
+
+        /// <summary>
+        /// The missile and the craft that launched it don't collide until the missile is clear of it: an unpowered round in its drop
+        /// time sits beside the airframe, and a launcher pulling hard flew its wing or tail into it and lost them to the crash.
+        /// </summary>
+        IEnumerator ClearLauncherRoutine(Vessel launcher)
+        {
+            // Set every physics tick: the game's collision manager recomputes its ignores whenever a vessel changes (the launch itself
+            // is one), which put the pair back in collision within the half second the round sat beside the wing (seen at a 10 G launch).
+            var colliders = part.GetComponentsInChildren<Collider>(includeInactive: false);
+            var launcherColliders = new List<Collider>();
+            int launcherParts = -1;
+            float start = Time.time, clear = launcher.GetRadius() + 15f;
+            var wait = new WaitForFixedUpdate();
+            while (launcher != null && launcher.loaded && vessel != null && !HasExploded && Time.time - start < 10f
+                && (vessel.CoM - launcher.CoM).sqrMagnitude < clear * clear)
+            {
+                if (launcher.parts.Count != launcherParts)
+                {
+                    launcherParts = launcher.parts.Count;
+                    launcherColliders.Clear();
+                    foreach (var p in launcher.parts) if (p != null) launcherColliders.AddRange(p.GetComponentsInChildren<Collider>(includeInactive: false));
+                }
+                SetLauncherCollisions(colliders, launcherColliders, true);
+                yield return wait;
+            }
+            SetLauncherCollisions(colliders, launcherColliders, false);
+        }
+
+        static void SetLauncherCollisions(Collider[] missile, List<Collider> launcher, bool ignore)
+        {
+            foreach (var a in missile)
+            {
+                if (a == null) continue;
+                foreach (var b in launcher)
+                    if (b != null) Physics.IgnoreCollision(a, b, ignore);
             }
         }
 

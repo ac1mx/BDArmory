@@ -3008,7 +3008,7 @@ namespace BDArmory.Radar
                             {
                                 guidanceType = missileBase.TargetingMode,
                                 distance = Vector3.Distance(missileBase.vessel.CoM, myWpnManager.vessel.CoM),
-                                time = AIUtils.TimeToCPA(missileBase.vessel, myWpnManager.vessel, myWpnManager.evadeThreshold * 1.2f),
+                                time = AIUtils.TimeToCPA(missileBase.vessel, myWpnManager.vessel, Mathf.Max(myWpnManager.evadeThreshold * 1.2f, MissileFire.IncomingLookAhead)), // Far enough to cover the pilot's longest evasion lead (a cap at the lead itself reads every missile as due).
                                 position = missileBase.vessel.CoM,
                                 vessel = missileBase.vessel,
                                 weaponManager = missileBase.SourceVessel == null ? null : missileBase.SourceVessel.ActiveController().WM,

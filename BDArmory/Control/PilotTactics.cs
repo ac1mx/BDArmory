@@ -235,7 +235,8 @@ namespace BDArmory.Control
         {
             var weaponManager = WeaponManager;
             if (!TacticsAllowed(weaponManager) || v.LandedOrSplashed) return false;
-            if (weaponManager.missileIsIncoming) { ++heightGateTicks[0]; return false; }
+            // A missile still far off (long shots warn for a minute or more) leaves time to climb; the break comes when it's close.
+            if (weaponManager.missileIsIncoming && weaponManager.incomingMissileTime < Mathf.Max(15f, 2f * MissileEvadeLead(weaponManager, false))) { ++heightGateTicks[0]; return false; }
             if (NewDogfight && weaponManager.CurrentMissile == null && distanceToTarget < 15000f) { ++heightGateTicks[5]; return false; } // Guns: close the gap, height for missile reach is no use.
             if (distanceToTarget < Mathf.Max(8000f, 3f * GunEmploymentRange(weaponManager))) { ++heightGateTicks[1]; return false; }
             bool havePicture = PlanActive(weaponManager) && PictureOf(v);
@@ -413,6 +414,43 @@ namespace BDArmory.Control
         const float missileEvadeHoldFactor = 1.3f; // Of the evade threshold, while already evading.
         const float committedTargetBias = 1.5f;
         float missileEvadeHoldUntil, evasionHoldUntil;
+
+        #region Evasion lead time
+        // When to start defending against a missile: not a fixed time to impact set per craft (5 s on one, 20 s on another — the
+        // latter spent 43% of a fight breaking from missiles still 10-20 s out), but the time this craft needs to get onto the missile's
+        // beam from where it is pointing now: a roll in, the turn at its own turn rate, and a few seconds settled there for the notch and
+        // the chaff to work. Latched for a missile once the break against it has started, so that reaching the beam (which shortens the
+        // lead) doesn't end the break it was needed for.
+        const float evadeRollTime = 0.6f, evadeSettleTime = 2.5f, evadeLeadMin = 3f, evadeLeadMax = 25f;
+        Vessel evadeLeadMissile;
+        float evadeLeadLatched;
+        float evadeLeadSum; int evadeLeadSamples; // Mean lead at the start of each break, for the metrics.
+        float EvadeLeadNeeded(Vessel missile)
+        {
+            if (missile == null || vessel.srfSpeed < 1) return evadeLeadMin;
+            Vector3 fromMissile = (vessel.CoM - missile.CoM).normalized;
+            float aspect = VectorUtils.Angle(vessel.Velocity(), -fromMissile); // 0: flying straight at it.
+            float toBeam = Mathf.Abs(90f - aspect);
+            float turnRateDeg = Mathf.Max(maxLiftAcceleration, bodyGravity) / Mathf.Max((float)vessel.srfSpeed, 50f) * Mathf.Rad2Deg;
+            return Mathf.Clamp(evadeRollTime + toBeam / Mathf.Max(turnRateDeg, 3f) + evadeSettleTime, evadeLeadMin, evadeLeadMax);
+        }
+        /// <summary>Time to go at which to break from the incoming missile (latched once breaking from it).</summary>
+        float MissileEvadeLead(MissileFire weaponManager, bool holding)
+        {
+            var missile = weaponManager.incomingMissileVessel;
+            if (missile == null) return weaponManager.evadeThreshold;
+            if (missile == evadeLeadMissile) return evadeLeadLatched * (holding ? missileEvadeHoldFactor : 1f);
+            return EvadeLeadNeeded(missile);
+        }
+        void LatchEvadeLead(MissileFire weaponManager)
+        {
+            var missile = weaponManager.incomingMissileVessel;
+            if (missile == null || missile == evadeLeadMissile) return;
+            evadeLeadMissile = missile;
+            evadeLeadLatched = EvadeLeadNeeded(missile);
+            evadeLeadSum += evadeLeadLatched; ++evadeLeadSamples;
+        }
+        #endregion
         Vector3 heldEvasionDirection;
         bool flyingEvasionHold; // Evasive is running only because of the hold: it steers the held break but doesn't extend it.
         void HoldEvasionDirection(Vector3 direction)

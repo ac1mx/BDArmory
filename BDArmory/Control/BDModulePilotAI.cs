@@ -1121,8 +1121,9 @@ namespace BDArmory.Control
         float gAoASlopePerDynPres;        //used to limit control input at very high dynamic pressures to avoid structural failure
         float gOffsetPerDynPres;
 
-        float posPitchDynPresLimitIntegrator = 1;
-        float negPitchDynPresLimitIntegrator = -1;
+        float posPitchLimit = 1, negPitchLimit = -1; // Stick that holds the angle of attack at its limit, each way (stick units).
+        float sinAoARate; // Smoothed rate of change of sin(AoA) (1/s).
+        int energyAoACapTicks; // Ticks the angle of attack was held down to save speed.
 
         float lastSinAoA;
         float lastPitchInput;
@@ -1231,6 +1232,9 @@ namespace BDArmory.Control
         Vessel incomingMissileVessel;
         enum KinematicEvasionStates { None, ToTarget, Crank, Notch, TurnAway, NotchDive }
         KinematicEvasionStates kinematicEvasionState = KinematicEvasionStates.None;
+        float hotCheckTime = -1f; // Last re-check that an incoming missile can't reach us flying at the target.
+        const float hotBreakFloor = 3f; // s: inside this the missile is evaded whatever the estimate says.
+        int hotNotEvadedTicks; // Ticks the fight was flown with a missile incoming that couldn't reach us.
 
         // Retreating
         bool retreating = false;
@@ -2306,16 +2310,34 @@ namespace BDArmory.Control
             var weaponManager = WeaponManager;
             if (weaponManager != null)
             {
-                bool evadeMissile = weaponManager.incomingMissileTime <= weaponManager.evadeThreshold && MissileNoticed(weaponManager.incomingMissileVessel);
+                bool evadeMissile = weaponManager.incomingMissileTime <= MissileEvadeLead(weaponManager, false) && MissileNoticed(weaponManager.incomingMissileVessel);
                 // Once evading a missile, keep evading it for a moment even if its predicted arrival drifts back over the threshold,
                 // instead of flipping between the break and the attack several times a second.
-                if (evadeMissile) missileEvadeHoldUntil = Time.time + committedEvasionTime;
-                else if (Committed && Time.time < missileEvadeHoldUntil && weaponManager.incomingMissileVessel != null && weaponManager.incomingMissileTime <= missileEvadeHoldFactor * weaponManager.evadeThreshold) evadeMissile = true;
+                if (evadeMissile) { missileEvadeHoldUntil = Time.time + committedEvasionTime; LatchEvadeLead(weaponManager); }
+                else if (Committed && Time.time < missileEvadeHoldUntil && weaponManager.incomingMissileVessel != null && weaponManager.incomingMissileTime <= MissileEvadeLead(weaponManager, true)) evadeMissile = true;
                 if (evadeMissile && UseKinematicEvasion && weaponManager.incomingMissileVessel) // Ignore missiles when they are post-thrust and we are turning back towards target
                 {
                     MissileBase mb = VesselModuleRegistry.GetMissileBase(weaponManager.incomingMissileVessel);
                     if (mb != null)
-                        evadeMissile = !(kinematicEvasionState == KinematicEvasionStates.ToTarget && incomingMissileVessel == weaponManager.incomingMissileVessel && mb.MissileState == MissileBase.MissileStates.PostThrust);
+                    {
+                        bool hotIsSafe = kinematicEvasionState == KinematicEvasionStates.ToTarget && incomingMissileVessel == weaponManager.incomingMissileVessel;
+                        if (hotIsSafe && mb.MissileState != MissileBase.MissileStates.PostThrust)
+                        {
+                            // Still under power, but the missile can't reach us even flying at the target: fly the fight (shots, climb,
+                            // cranks) instead of an "evasion" pointed at the target that skips all of it. Checked again twice a second,
+                            // since the fight may turn us away from it; the break still comes in the last seconds whatever the estimate.
+                            if (Time.time - hotCheckTime > 0.5f)
+                            {
+                                hotCheckTime = Time.time;
+                                Vector3 threatDirection = -weaponManager.incomingMissileVessel.Velocity().ProjectOnPlanePreNormalized(upDirection);
+                                MissileKinematicEvasion(Vector3.Cross(upDirection, threatDirection).normalized, threatDirection);
+                                hotIsSafe = kinematicEvasionState == KinematicEvasionStates.ToTarget;
+                            }
+                            hotIsSafe &= weaponManager.incomingMissileTime > hotBreakFloor;
+                            if (hotIsSafe) ++hotNotEvadedTicks;
+                        }
+                        evadeMissile = !hotIsSafe;
+                    }
                 }
                 else
                     kinematicEvasionState = KinematicEvasionStates.None; // Reset missile kinematic evasion state
@@ -3912,7 +3934,7 @@ namespace BDArmory.Control
             if (Time.time - lastSteeringMetricsLogTime > 10f)
             {
                 lastSteeringMetricsLogTime = Time.time;
-                Debug.Log($"[BDArmory.BDModulePilotAI]: SteeringMetrics {vessel.vesselName} adaptive={AdaptiveActive} newControl={NewControl} commitment={NewCommitment} geometryHeld={geometryHoldTicks * Time.fixedDeltaTime:F1}s aimTime={aimSamples * Time.fixedDeltaTime:F1}s aimRMS={(aimSamples > 0 ? Math.Sqrt(aimErrorSqrSum / aimSamples) : 0):F2}deg onTarget={(aimSamples > 0 ? 100.0 * aimOnTargetSamples / aimSamples : 0):F1}% stickChange={(steerSamples > 0 ? steerChangeSum / steerSamples : 0):F4}/frame confidence={controlCore.pitch.Confidence:F2}/{controlCore.yaw.Confidence:F2}/{controlCore.roll.Confidence:F2} authority={controlCore.pitch.Authority:G3}/{controlCore.yaw.Authority:G3}/{controlCore.roll.Authority:G3} thrustAuthority={constAuthority.x:G3}/{constAuthority.z:G3}/{constAuthority.y:G3} rollLead={controlCore.roll.LeadTime:F2}s vipFlee={vipFleeTicks * Time.fixedDeltaTime:F1}s escort={escortTicks * Time.fixedDeltaTime:F1}s escortRecalls={escortRecallCount} team={(WeaponManager != null && WeaponManager.Team != null ? WeaponManager.Team.Name : "none")} snapshot={snapshotTicks * Time.fixedDeltaTime:F1}s stalemateBreaks={stalemateBreakCount} missileShotsHeld={missileShotsHeldForTerrain} shotsHeldForOdds={missileShotsHeldForOdds} shotsHeldForTiming={missileShotsHeldForTiming} radarPickSwitches={radarPickSwitches} bfm(s)=offensive {offensiveTicks * Time.fixedDeltaTime:F0}/defensive {defensiveTicks * Time.fixedDeltaTime:F0}/neutral {neutralTicks * Time.fixedDeltaTime:F0}/lag {lagPursuitTicks * Time.fixedDeltaTime:F0}/pure {purePursuitTicks * Time.fixedDeltaTime:F0}/lead {leadPursuitTicks * Time.fixedDeltaTime:F0} blindSpot={(WeaponManager != null ? WeaponManager.VisualBlindSpotSamples : 0)} bodyBlocked={(WeaponManager != null ? WeaponManager.VisualBlockedSamples : 0)} missileCoasts={MissileBase.radarCoastCount} seekerHandBacks={MissileBase.seekerHandBackCount} noisyLockTicks={MissileBase.noisyLockTicks} visualRange={(targetVessel != null && WeaponManager != null ? WeaponManager.VisualSample(targetVessel).range : 0):F0}m targetDistance={(targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f):F0}m surfaceRate={controlCore.pitch.actuatorRate:G3}/{controlCore.yaw.actuatorRate:G3}/{controlCore.roll.actuatorRate:G3} q={vessel.dynamicPressurekPa:F1}kPa speed={vessel.srfSpeed:F0} machFactor={liftMachFactor:F2} alt={vessel.radarAltitude:F0} modelCost={(controlCoreTimedFrames > 0 ? controlCoreTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / controlCoreTimedFrames : 0):F2}us/tick tactics(s)=defensive {defensiveBreakTicks * Time.fixedDeltaTime:F1}/highYoYo {highYoYoTicks * Time.fixedDeltaTime:F1}/lowYoYo {lowYoYoTicks * Time.fixedDeltaTime:F1}/crank {crankTicks * Time.fixedDeltaTime:F1}/pump {pumpTicks * Time.fixedDeltaTime:F1}/offset {offsetTicks * Time.fixedDeltaTime:F1}/oneCircle {oneCircleTicks * Time.fixedDeltaTime:F1}/climb {energyClimbTicks * Time.fixedDeltaTime:F1}/zoom {zoomTicks * Time.fixedDeltaTime:F1} diveLimited={diveLimitTicks * Time.fixedDeltaTime:F1}s climbLimited={climbLimitTicks * Time.fixedDeltaTime:F1}s liftCapability={LiftCapability:F1} energyExtends={energyExtendCount} flareSalvos={preemptiveFlareSalvos} radarSilenced={radarSilenceCount} hideHeat={rearAspectHeatThreat} offAspectLimit={offAspectLimit:F0} flaps={flapsDeployed} bestTurnSpeed={bestTurnSpeed:F0} turnRadius={turnRadius:F0} planner={bfmPlanner} bfm={bfmTicks * Time.fixedDeltaTime:F1}s bfmReplans={bfmReplans} bfmAimHandovers={bfmAimHandovers} energyModel={fullThrustAccel:F1}/{dragCoefficients[0]:F3}/{dragCoefficients[1]:F3} rollRate={observedRollRate:F1} flyoutEvasion={missileFlyoutEvasion} evasionFlyouts={flyoutEvaluations} launchBays={(WeaponManager != null ? $"waits {WeaponManager.launchBayWaits}/{WeaponManager.launchBayWaitTime:F1}s preOpen {WeaponManager.launchBayPreOpens} aborts {WeaponManager.launchBayAborts} notReady {WeaponManager.launchBayNotReady} timeouts {WeaponManager.launchBayTimeouts} open {WeaponManager.LaunchBayOpenSeconds:F0}s" : "none")} rcsExposure={BDAStealth.Patches.Exposure(vessel):F2} governor={controlCore.pitchGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.yawGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.rollGovernor.Gain((float)vessel.dynamicPressurekPa):F2} governorLowest={controlCore.pitchGovernor.LowestGain:F2}/{controlCore.yawGovernor.LowestGain:F2}/{controlCore.rollGovernor.LowestGain:F2} reversals={controlCore.pitchGovernor.ReversalRate:F1}/{controlCore.yawGovernor.ReversalRate:F1}/{controlCore.rollGovernor.ReversalRate:F1} flips={controlCore.pitchGovernor.FlipRate:F1}/{controlCore.yawGovernor.FlipRate:F1}/{controlCore.rollGovernor.FlipRate:F1} {PlannerMetrics()} {SalvoMetrics()} {BFMMetrics()} {SectionMetrics()} {MatchupMetrics()} {GunMetrics()} {OrdersMetrics()} status={currentStatus}");
+                Debug.Log($"[BDArmory.BDModulePilotAI]: SteeringMetrics {vessel.vesselName} adaptive={AdaptiveActive} newControl={NewControl} commitment={NewCommitment} geometryHeld={geometryHoldTicks * Time.fixedDeltaTime:F1}s aimTime={aimSamples * Time.fixedDeltaTime:F1}s aimRMS={(aimSamples > 0 ? Math.Sqrt(aimErrorSqrSum / aimSamples) : 0):F2}deg onTarget={(aimSamples > 0 ? 100.0 * aimOnTargetSamples / aimSamples : 0):F1}% stickChange={(steerSamples > 0 ? steerChangeSum / steerSamples : 0):F4}/frame confidence={controlCore.pitch.Confidence:F2}/{controlCore.yaw.Confidence:F2}/{controlCore.roll.Confidence:F2} authority={controlCore.pitch.Authority:G3}/{controlCore.yaw.Authority:G3}/{controlCore.roll.Authority:G3} thrustAuthority={constAuthority.x:G3}/{constAuthority.z:G3}/{constAuthority.y:G3} rollLead={controlCore.roll.LeadTime:F2}s vipFlee={vipFleeTicks * Time.fixedDeltaTime:F1}s escort={escortTicks * Time.fixedDeltaTime:F1}s escortRecalls={escortRecallCount} team={(WeaponManager != null && WeaponManager.Team != null ? WeaponManager.Team.Name : "none")} snapshot={snapshotTicks * Time.fixedDeltaTime:F1}s stalemateBreaks={stalemateBreakCount} missileShotsHeld={missileShotsHeldForTerrain} shotsHeldForOdds={missileShotsHeldForOdds} shotsHeldForTiming={missileShotsHeldForTiming} radarPickSwitches={radarPickSwitches} bfm(s)=offensive {offensiveTicks * Time.fixedDeltaTime:F0}/defensive {defensiveTicks * Time.fixedDeltaTime:F0}/neutral {neutralTicks * Time.fixedDeltaTime:F0}/lag {lagPursuitTicks * Time.fixedDeltaTime:F0}/pure {purePursuitTicks * Time.fixedDeltaTime:F0}/lead {leadPursuitTicks * Time.fixedDeltaTime:F0} blindSpot={(WeaponManager != null ? WeaponManager.VisualBlindSpotSamples : 0)} bodyBlocked={(WeaponManager != null ? WeaponManager.VisualBlockedSamples : 0)} missileCoasts={MissileBase.radarCoastCount} seekerHandBacks={MissileBase.seekerHandBackCount} noisyLockTicks={MissileBase.noisyLockTicks} visualRange={(targetVessel != null && WeaponManager != null ? WeaponManager.VisualSample(targetVessel).range : 0):F0}m targetDistance={(targetVessel != null ? (targetVessel.CoM - vessel.CoM).magnitude : -1f):F0}m surfaceRate={controlCore.pitch.actuatorRate:G3}/{controlCore.yaw.actuatorRate:G3}/{controlCore.roll.actuatorRate:G3} q={vessel.dynamicPressurekPa:F1}kPa speed={vessel.srfSpeed:F0} machFactor={liftMachFactor:F2} alt={vessel.radarAltitude:F0} modelCost={(controlCoreTimedFrames > 0 ? controlCoreTicks * 1e6 / System.Diagnostics.Stopwatch.Frequency / controlCoreTimedFrames : 0):F2}us/tick tactics(s)=defensive {defensiveBreakTicks * Time.fixedDeltaTime:F1}/highYoYo {highYoYoTicks * Time.fixedDeltaTime:F1}/lowYoYo {lowYoYoTicks * Time.fixedDeltaTime:F1}/crank {crankTicks * Time.fixedDeltaTime:F1}/pump {pumpTicks * Time.fixedDeltaTime:F1}/offset {offsetTicks * Time.fixedDeltaTime:F1}/oneCircle {oneCircleTicks * Time.fixedDeltaTime:F1}/climb {energyClimbTicks * Time.fixedDeltaTime:F1}/zoom {zoomTicks * Time.fixedDeltaTime:F1} diveLimited={diveLimitTicks * Time.fixedDeltaTime:F1}s climbLimited={climbLimitTicks * Time.fixedDeltaTime:F1}s hotNotEvaded={hotNotEvadedTicks * Time.fixedDeltaTime:F1}s energyAoACap={energyAoACapTicks * Time.fixedDeltaTime:F1}s evadeLead={(evadeLeadSamples > 0 ? evadeLeadSum / evadeLeadSamples : 0f):F1}s/{evadeLeadSamples} reacquireRejects={MissileBase.reacquireRejectCount} liftCapability={LiftCapability:F1} energyExtends={energyExtendCount} flareSalvos={preemptiveFlareSalvos} radarSilenced={radarSilenceCount} hideHeat={rearAspectHeatThreat} offAspectLimit={offAspectLimit:F0} flaps={flapsDeployed} bestTurnSpeed={bestTurnSpeed:F0} turnRadius={turnRadius:F0} planner={bfmPlanner} bfm={bfmTicks * Time.fixedDeltaTime:F1}s bfmReplans={bfmReplans} bfmAimHandovers={bfmAimHandovers} energyModel={fullThrustAccel:F1}/{dragCoefficients[0]:F3}/{dragCoefficients[1]:F3} rollRate={observedRollRate:F1} flyoutEvasion={missileFlyoutEvasion} evasionFlyouts={flyoutEvaluations} launchBays={(WeaponManager != null ? $"waits {WeaponManager.launchBayWaits}/{WeaponManager.launchBayWaitTime:F1}s preOpen {WeaponManager.launchBayPreOpens} aborts {WeaponManager.launchBayAborts} notReady {WeaponManager.launchBayNotReady} timeouts {WeaponManager.launchBayTimeouts} open {WeaponManager.LaunchBayOpenSeconds:F0}s" : "none")} rcsExposure={BDAStealth.Patches.Exposure(vessel):F2} governor={controlCore.pitchGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.yawGovernor.Gain((float)vessel.dynamicPressurekPa):F2}/{controlCore.rollGovernor.Gain((float)vessel.dynamicPressurekPa):F2} governorLowest={controlCore.pitchGovernor.LowestGain:F2}/{controlCore.yawGovernor.LowestGain:F2}/{controlCore.rollGovernor.LowestGain:F2} reversals={controlCore.pitchGovernor.ReversalRate:F1}/{controlCore.yawGovernor.ReversalRate:F1}/{controlCore.rollGovernor.ReversalRate:F1} flips={controlCore.pitchGovernor.FlipRate:F1}/{controlCore.yawGovernor.FlipRate:F1}/{controlCore.rollGovernor.FlipRate:F1} {PlannerMetrics()} {SalvoMetrics()} {BFMMetrics()} {SectionMetrics()} {MatchupMetrics()} {GunMetrics()} {OrdersMetrics()} status={currentStatus}");
             }
         }
         #endregion
@@ -4468,7 +4490,7 @@ namespace BDArmory.Control
             if (
                 missileThreat != null
                 && (missileThreatMB = VesselModuleRegistry.GetMissileBase(missileThreat)) != null // Modular missiles can lose the MMG part.
-                && ((closingTime = weaponManager.ThreatClosingTime(missileThreat)) <= weaponManager.evadeThreshold * (Committed && Time.time < missileEvadeHoldUntil ? missileEvadeHoldFactor : 1f)
+                && ((closingTime = weaponManager.ThreatClosingTime(missileThreat)) <= MissileEvadeLead(weaponManager, Committed && Time.time < missileEvadeHoldUntil)
                     || NewCommitment && missileEvadeChosen) // The decision to evade this missile was taken this tick on the weapon manager's estimate of its arrival; fly it.
             ) // Missile evasion
             {
@@ -4544,7 +4566,7 @@ namespace BDArmory.Control
 
                         if (weaponManager.incomingMissileTime > weaponManager.cmThreshold)
                         {
-                            float t = Mathf.Clamp01((weaponManager.incomingMissileTime - weaponManager.cmThreshold) / (weaponManager.evadeThreshold - weaponManager.cmThreshold));
+                            float t = Mathf.Clamp01((weaponManager.incomingMissileTime - weaponManager.cmThreshold) / Mathf.Max(MissileEvadeLead(weaponManager, false) - weaponManager.cmThreshold, 0.1f));
                             t = -1.72f * t * t * t + 4.06f * t * t - 3.34f * t + 1f;
                             diveAngle = Mathf.Lerp(35f, 75f, t); // Gradually dive more as missile gets closer
                         }
@@ -4619,7 +4641,7 @@ namespace BDArmory.Control
                     if (BDArmorySettings.DEBUG_LINES) debugBreakDirection = breakDirection;
 
                     // Rotate target direction towards break direction, starting with 15 deg, and increasing to maxAllowedAoA as missile gets closer
-                    float rotAngle = Mathf.Deg2Rad * Mathf.Lerp(Mathf.Min(maxAllowedAoA, 90), 15f, Mathf.Clamp01(weaponManager.incomingMissileTime / weaponManager.evadeThreshold));
+                    float rotAngle = Mathf.Deg2Rad * Mathf.Lerp(Mathf.Min(maxAllowedAoA, 90), 15f, Mathf.Clamp01(weaponManager.incomingMissileTime / MissileEvadeLead(weaponManager, false)));
                     targetDirection = Vector3.RotateTowards(vesselTransform.up, breakDirection, rotAngle, 0).normalized;
 
                     if (weaponManager.isFlaring)
@@ -5680,134 +5702,77 @@ namespace BDArmory.Control
             gOffsetPerDynPres = maxPosG - gAoASlopePerDynPres * sinAoAAtMaxPosG;     //g force offset
         }
 
+        const float aoaLimitLead = 0.2f; // s: the angle of attack is limited where it will be this far ahead (plus the time to stop the rotation), so a fast pitch-up stops at the limit instead of overshooting it.
+        const float aoaBrakeFallback = 0.6f; // rad/s² per kPa: braking authority assumed until the control model has identified it.
+        const float aoaLimitGain = 3f; // Stick per second per unit of (fractional) angle of attack error: how fast the held stick settles.
+        const float aoaLimitCut = 2f; // Stick taken off per unit of predicted overshoot (fraction of the limit).
+
+        /// <summary>
+        /// Angle of attack limit (the stall guard; there's no G limit). For each direction the stick that holds the angle of attack at
+        /// its limit is learnt by an integrator on the predicted error, in stick units: the trim angle per unit stick barely changes with
+        /// dynamic pressure. The limit used to be kept per unit of dynamic pressure, so in a decelerating pull (q falling eightfold from
+        /// 300 to 100 m/s) it rose eightfold and never bound: an F-15 went from 35° to 86° and stalled, the nose bucking back on its own.
+        /// A predicted overshoot takes stick off at once, in proportion, so the pull eases onto the limit smoothly and stays there.
+        /// </summary>
         void AdjustPitchForGAndAoALimits(FlightCtrlState s)
         {
-            float minSinAoA = 0, maxSinAoA = 0, curSinAoA = 0;
-            float negPitchDynPresLimit = 0, posPitchDynPresLimit = 0;
-
-            if (vessel.LandedOrSplashed || vessel.srfSpeed < Math.Min(minSpeed, takeOffSpeed))         //if we're going too slow, don't use this
+            float curSinAoA = Vector3.Dot(vessel.Velocity().normalized, vessel.ReferenceTransform.forward);
+            float dt = Time.fixedDeltaTime;
+            if (vessel.LandedOrSplashed || vessel.srfSpeed < Math.Min(minSpeed, takeOffSpeed) || EffectiveMaxAoA >= 90 || vessel.InNearVacuum())
             {
-                float speed = Math.Max(takeOffSpeed, minSpeed);
-                negPitchDynPresLimitIntegrator = -1f * 0.001f * 0.5f * 1.225f * speed * speed;
-                posPitchDynPresLimitIntegrator = 1f * 0.001f * 0.5f * 1.225f * speed * speed;
+                posPitchLimit = 1f; negPitchLimit = -1f; sinAoARate = 0f;
+                lastPitchInput = s.pitch;
+                lastSinAoA = curSinAoA;
                 return;
             }
 
+            sinAoARate = Mathf.Lerp(sinAoARate, (curSinAoA - lastSinAoA) / dt, Mathf.Clamp01(dt / 0.05f));
+            // Slow, the nose's rotation takes a long time to stop (an F-15 at 120 m/s pitching at 2 rad/s went on from 36° to 55° with
+            // the stick fully forward), so the lead grows by the time to brake the rotation at the authority there is at this pressure.
+            float brake = 0.5f * (controlCore.pitch.Confidence > 0.5f ? Mathf.Max(controlCore.pitch.Authority, aoaBrakeFallback) : aoaBrakeFallback) * (float)vessel.dynamicPressurekPa + Mathf.Abs(constAuthority.x);
+            float predicted = curSinAoA + (aoaLimitLead + Mathf.Min(Mathf.Abs(sinAoARate) / (2f * Mathf.Max(brake, 0.5f)), 1f)) * sinAoARate;
+            float maxSinAoA = Mathf.Max(maxAllowedSinAoA, 0.05f);
+            // Energy floor: beyond the close fight, the turns the long-range tactics ask for (compress, press, crank, height, one after
+            // another) were each flown at the full angle of attack, 50-70 m/s bled per turn, until an F-15 was at 62 m/s at 5 km and
+            // departed. Below corner speed the angle allowed there shrinks with speed, to 12° at 1.5 times the minimum speed. Not in the
+            // last seconds of a missile break, nor within 8 km of the target, where the turn is the fight.
+            var wm = WeaponManager;
+            bool closeFight = targetVessel != null && (targetVessel.CoM - vessel.CoM).sqrMagnitude < 8000f * 8000f;
+            bool lastSeconds = wm != null && wm.missileIsIncoming && wm.incomingMissileTime < hotBreakFloor + 2f;
+            float floorSpeed = 1.5f * minSpeed;
+            if (!closeFight && !lastSeconds && cornerSpeed > floorSpeed && vessel.srfSpeed < cornerSpeed)
+            {
+                float capDeg = Mathf.Lerp(12f, Mathf.Asin(maxSinAoA) * Mathf.Rad2Deg, ((float)vessel.srfSpeed - floorSpeed) / (cornerSpeed - floorSpeed));
+                float capSin = Mathf.Sin(capDeg * Mathf.Deg2Rad);
+                if (capSin < maxSinAoA) { maxSinAoA = capSin; ++energyAoACapTicks; }
+            }
+            float posError = (maxSinAoA - predicted) / maxSinAoA; // > 0: room left before the limit.
+            float negError = (maxSinAoA + predicted) / maxSinAoA;
+            posPitchLimit = Mathf.Clamp(posPitchLimit + aoaLimitGain * posError * dt, 0f, 1f);
+            negPitchLimit = Mathf.Clamp(negPitchLimit - aoaLimitGain * negError * dt, -1f, 0f);
+            float posLim = Mathf.Max(posPitchLimit - aoaLimitCut * Mathf.Max(0f, -posError), -1f);
+            float negLim = Mathf.Min(negPitchLimit + aoaLimitCut * Mathf.Max(0f, -negError), 1f);
+
             float invVesselDynPreskPa = 1f / (float)vessel.dynamicPressurekPa;
-
-            if (EffectiveMaxAoA < 90)
-            {
-                // There's no G limit: the only bound on the angle of attack is the stall guard.
-                maxSinAoA = maxAllowedSinAoA;
-                minSinAoA = -maxAllowedSinAoA;
-
-                curSinAoA = Vector3.Dot(vessel.Velocity().normalized, vessel.ReferenceTransform.forward);
-
-                float centerSinAoA = (minSinAoA + maxSinAoA) * 0.5f;
-                float curSinAoACentered = curSinAoA - centerSinAoA;
-                float sinAoADiff = Mathf.Max(0.5f * Math.Abs(maxSinAoA - minSinAoA), 0.001f); // Avoid divide-by-zero.
-                float curSinAoANorm = curSinAoACentered / sinAoADiff;      //scaled so that from centerAoA to maxAoA is 1
-
-                float negPitchScalar, posPitchScalar;
-                negPitchScalar = negPitchDynPresLimitIntegrator * invVesselDynPreskPa - lastPitchInput;
-                posPitchScalar = lastPitchInput - posPitchDynPresLimitIntegrator * invVesselDynPreskPa;
-
-                //update pitch control limits as needed
-                negPitchDynPresLimit = posPitchDynPresLimit = 0;
-                if (curSinAoANorm < -0.15f)
-                {
-                    float sinAoAOffset = curSinAoANorm + 1;     //set max neg aoa to be 0
-                    float AoALimScalar = Math.Abs(curSinAoANorm);
-                    AoALimScalar *= AoALimScalar;
-                    AoALimScalar *= AoALimScalar;
-                    AoALimScalar *= AoALimScalar;
-                    if (AoALimScalar > 1)
-                        AoALimScalar = 1;
-
-                    float pitchInputScalar = negPitchScalar;
-                    pitchInputScalar = 1 - Mathf.Clamp01(Math.Abs(pitchInputScalar));
-                    pitchInputScalar *= pitchInputScalar;
-                    pitchInputScalar *= pitchInputScalar;
-                    pitchInputScalar *= pitchInputScalar;
-                    if (pitchInputScalar < 0)
-                        pitchInputScalar = 0;
-
-                    float deltaSinAoANorm = curSinAoA - lastSinAoA;
-                    deltaSinAoANorm /= sinAoADiff;
-
-                    if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Updating Neg Gs");
-                    negPitchDynPresLimitIntegrator -= 0.01f * Mathf.Clamp01(AoALimScalar + pitchInputScalar) * sinAoAOffset * (float)vessel.dynamicPressurekPa;
-                    negPitchDynPresLimitIntegrator -= 0.005f * deltaSinAoANorm * (float)vessel.dynamicPressurekPa;
-                    if (sinAoAOffset < 0)
-                        negPitchDynPresLimit = -0.3f * sinAoAOffset;
-                }
-                if (curSinAoANorm > 0.15f)
-                {
-                    float sinAoAOffset = curSinAoANorm - 1;     //set max pos aoa to be 0
-                    float AoALimScalar = Math.Abs(curSinAoANorm);
-                    AoALimScalar *= AoALimScalar;
-                    AoALimScalar *= AoALimScalar;
-                    AoALimScalar *= AoALimScalar;
-                    if (AoALimScalar > 1)
-                        AoALimScalar = 1;
-
-                    float pitchInputScalar = posPitchScalar;
-                    pitchInputScalar = 1 - Mathf.Clamp01(Math.Abs(pitchInputScalar));
-                    pitchInputScalar *= pitchInputScalar;
-                    pitchInputScalar *= pitchInputScalar;
-                    pitchInputScalar *= pitchInputScalar;
-                    if (pitchInputScalar < 0)
-                        pitchInputScalar = 0;
-
-                    float deltaSinAoANorm = curSinAoA - lastSinAoA;
-                    deltaSinAoANorm /= sinAoADiff;
-
-                    if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Updating Pos Gs");
-                    posPitchDynPresLimitIntegrator -= 0.01f * Mathf.Clamp01(AoALimScalar + pitchInputScalar) * sinAoAOffset * (float)vessel.dynamicPressurekPa;
-                    posPitchDynPresLimitIntegrator -= 0.005f * deltaSinAoANorm * (float)vessel.dynamicPressurekPa;
-                    if (sinAoAOffset > 0)
-                        posPitchDynPresLimit = -0.3f * sinAoAOffset;
-                }
-            }
-
             float currentG = -Vector3.Dot(vessel.acceleration, vessel.ReferenceTransform.forward);
-            float negLim, posLim;
-            negLim = !vessel.InNearVacuum() ? negPitchDynPresLimitIntegrator * invVesselDynPreskPa + negPitchDynPresLimit : -1;
-            if (negLim > s.pitch)
+            if (s.pitch < negLim)
             {
-                {
-                    negPitchDynPresLimitIntegrator -= (float)(0.15 * vessel.dynamicPressurekPa);        //just an override in case things break
-
-                    maxNegG = currentG * invVesselDynPreskPa;
-                    sinAoAAtMaxNegG = curSinAoA;
-
-                    negPitchDynPresLimit = 0;
-                }
-
+                maxNegG = currentG * invVesselDynPreskPa;
+                sinAoAAtMaxNegG = curSinAoA;
                 SetFlightControlState(s, negLim, s.yaw, s.roll);
-                if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Limiting Neg Gs");
+                if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Limiting Neg AoA");
             }
-            posLim = !vessel.InNearVacuum() ? posPitchDynPresLimitIntegrator * invVesselDynPreskPa + posPitchDynPresLimit : 1;
-            if (posLim < s.pitch)
+            else if (s.pitch > posLim)
             {
-                {
-                    posPitchDynPresLimitIntegrator += (float)(0.15 * vessel.dynamicPressurekPa);        //just an override in case things break
-
-                    maxPosG = currentG * invVesselDynPreskPa;
-                    sinAoAAtMaxPosG = curSinAoA;
-
-                    posPitchDynPresLimit = 0;
-                }
-
+                maxPosG = currentG * invVesselDynPreskPa;
+                sinAoAAtMaxPosG = curSinAoA;
                 SetFlightControlState(s, posLim, s.yaw, s.roll);
-                if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Limiting Pos Gs");
+                if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine($"Limiting Pos AoA");
             }
 
             lastPitchInput = s.pitch;
             lastSinAoA = curSinAoA;
-
-            // if ((BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) && negLim>posLim) debugString.AppendLine($"Bad limits: curSinAoA: {curSinAoA}, sinAoADiff: {sinAoADiff}, : curSinAoANorm: {curSinAoANorm}, maxAllowedAoA: {maxAllowedAoA}, maxAllowedSinAoA: {maxAllowedSinAoA}");
-            if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine(string.Format("Final Pitch: {0,7:F4}  (Limits: {1,7:F4} — {2,6:F4})", s.pitch, negLim, posLim));
+            if (BDArmorySettings.DEBUG_TELEMETRY || BDArmorySettings.DEBUG_AI) debugString.AppendLine(string.Format("Final Pitch: {0,7:F4}  (Limits: {1,7:F4} — {2,6:F4}, predicted AoA {3:F1}°)", s.pitch, negLim, posLim, Mathf.Asin(Mathf.Clamp(predicted, -1f, 1f)) * Mathf.Rad2Deg));
         }
 
         void CalculateAccelerationAndTurningCircle()
