@@ -43,13 +43,13 @@ namespace BDArmory.Utils
             base.OnStart();
             if (!BDModulePilotAI.steeringMetricsEnabled || !HighLogic.LoadedSceneIsFlight) { enabled = false; return; }
             GameEvents.onVesselWasModified.Add(OnModified);
-            GameEvents.onPartJointBreak.Add(OnJointBreak);
+            GameEvents.onPartJointBreak.Add(LogPartBreak);
         }
 
         void OnDestroy()
         {
             GameEvents.onVesselWasModified.Remove(OnModified);
-            GameEvents.onPartJointBreak.Remove(OnJointBreak);
+            GameEvents.onPartJointBreak.Remove(LogPartBreak);
         }
 
         void OnModified(Vessel v)
@@ -59,7 +59,7 @@ namespace BDArmory.Utils
             Debug.Log($"[BDArmory.JointProbe]: {vessel.vesselName} modified t={Time.time - startTime:F1} parts={vessel.parts.Count} G={vessel.geeForce:F1}");
         }
 
-        void OnJointBreak(PartJoint joint, float force)
+        void LogPartBreak(PartJoint joint, float force)
         {
             if (!started || joint == null || joint.Child == null || joint.Child.vessel != vessel) return;
             Debug.Log($"[BDArmory.JointProbe]: {vessel.vesselName} attach joint broke {Name(joint.Child)} from {Name(joint.Parent)} force={force:F0} G={vessel.geeForce:F1}");
